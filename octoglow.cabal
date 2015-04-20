@@ -20,6 +20,13 @@ executable octoglow
   main-is:             Main.hs
   -- other-modules:       
   -- other-extensions:    
-  build-depends:       base >=4.7 && <4.8
+  build-depends: base >=4.7 && <4.8
+               , warp
+               , wai
+               , http-types
+               , transformers
+               , directory
+               , filepath
+               , bytestring
   hs-source-dirs:      src
   default-language:    Haskell2010

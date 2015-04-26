@@ -46,6 +46,11 @@ FolderContents.prototype.update = function(server, folder) {
         this.currentXHR = null;
     };
 
+    if (folder === null) {
+        this.pictures.set('pictures', []);
+        return;
+    }
+
     var xhr = new XMLHttpRequest;
     xhr.responseType = 'json';
     xhr.open('GET', server + '/contents?' + $.param({'folder': folder}));
@@ -62,47 +67,81 @@ FolderContents.prototype.update = function(server, folder) {
     this.currentXHR = xhr;
 };
 
-(function() {
-    function link(model, field, handler) {
-        model.on('change:' + field, handler);
-        handler(model, model.get(field));
-    }
+function link(model, field, handler) {
+    model.on('change:' + field, handler);
+    handler(model, model.get(field));
+}
 
+(function() {
+    // application models
     var connection = new ServerConnection;
     var contents = new FolderContents;
-    
+    var currentFolder = new Backbone.Model({
+        folder: null
+    });
+
+    // elements
+    var $serverSelection = $('#server-selection');
+    var $folders = $('.folders');
+    var $pictures = $('.pictures');
+
     link(connection.status, 'status', function(_, status) {
         $('.server-status-text').text(status);
-        $('.folders').prop('disabled', status !== 'connected');
+        $folders.prop('disabled', status !== 'connected');
         $('.include-subfolders').prop('disabled', status !== 'connected');
     });
 
     link(connection.status, 'folders', function(_, folders) {
-        $('.folders').empty();
+        $folders.empty();
         folders.forEach(function(folder) {
             var option = $('<option>');
             option.attr({'value': folder}).text(folder);
-            $('.folders').append(option);
+            $folders.append(option);
         });
+
+        updateCurrentFolder();
+    });
+
+    link(currentFolder, 'folder', function(_, folder) {
+        contents.update($serverSelection.val(), folder);
     });
 
     link(contents.pictures, 'pictures', function(_, pictures) {
-        var folder = $($('.folders option:selected')[0]).text();
+        var folder = currentFolder.get('folder');
         
-        $('.pictures').empty();
+        $pictures.empty();
         pictures.forEach(function(picture) {
             var img = $('<img>');
-            img.attr({'src': $('#server-selection').val() + '/photo?' + $.param({'folder': folder, 'photo': picture.name})});
-            $('.pictures').append(img);
+            img.attr({'src': $serverSelection.val() + '/photo?' + $.param({'folder': folder, 'photo': picture.name})});
+            $pictures.append(img);
         });
     });
 
-    $('#server-selection').change(function() {
-        connection.connect($(this).val());
+    $serverSelection.change(function() {
+        var server = $(this).val();
+        localStorage.setItem('server', server);
+        connection.connect(server);
     });
 
-    $('.folders').change(function() {
+    function updateCurrentFolder() {
         var selected = $('.folders option:selected');
-        contents.update($('#server-selection').val(), $(selected[0]).text());
+        if (selected.length) {
+            currentFolder.set('folder', $(selected[0]).text());
+        } else {
+            currentFolder.set('folder', null);
+        }
+    }
+    
+    $folders.change(function() {
+        updateCurrentFolder();
     });
+
+
+
+    // load previous state
+    var previousServer = localStorage.getItem('server');
+    if (previousServer !== null) {
+        $serverSelection.val(previousServer);
+        $serverSelection.change();
+    }    
 })();

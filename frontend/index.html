@@ -6,13 +6,19 @@
 </head>
 
 <body>
-<label for="server-selection">Server</label><input id="server-selection"></input>
-<div class="server-status">Status:<span class="server-status-text">disconnected</span></div>
-<select disabled class="folders"></select>
-<input disabled type="checkbox" class="include-subfolders">Include Subfolders</input>
 
-<div class="pictures">
+<div class="ui">
+  <label for="server-selection">Server</label>
+  <input id="server-selection"></input>
+  <span class="server-status-text">disconnected</span>
+  <select disabled class="folders"></select>
+  <input disabled type="checkbox" id="include-subfolders" />
+  <label for="include-subfolders">Include Subfolders</label>
 </div>
+
+<div id='current-picture-wrapper' class='picture-wrapper'><img id='current-picture'></img></div>
+<div id='next-picture-wrapper' class='picture-wrapper'><img id='next-picture'></img></div>
+
 </body>
 
 <script src="underscore.js"></script>

@@ -1,3 +1,77 @@
 body {
+    margin: 0;
+    background-color: black;
+}
 
+.ui {
+    z-index: 10;
+    
+    transition: opacity 0.4s ease-out;
+    opacity: 0.0;
+    
+    padding:5px;
+    background-color: rgba(255,255,255,0.8);
+
+    display: inline-block;
+    position: absolute;
+
+    left: 25px;
+    top: 25px;
+}
+
+.ui:hover {
+    opacity: 1.0;
+}
+
+.ui .folders {
+    display: block;
+}
+
+.ui .include-subfolders {
+    display: block;
+}
+
+.picture-wrapper {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    right: 0;
+
+    background: black;
+
+    text-align: center;
+
+    border: 0;
+    padding: 0;
+    
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+}
+
+#current-picture-wrapper {
+    z-index: 1;
+    transition: opacity 1.7s ease-in-out;
+    opacity: 1;
+}
+
+#current-picture-wrapper:hover {
+    opacity: 0;
+}
+
+#current-picture {
+    border: 0;
+    padding: 0;
+    height: 100vh;
+
+}
+
+#next-picture {
+    border: 0;
+    padding: 0;
+    height: 100vh;
+}
+
+#next-picture-wrapper {
 }

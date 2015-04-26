@@ -14,8 +14,8 @@ ServerConnection.prototype.connect = function(url) {
     }
 
     var xhr = new XMLHttpRequest;
-    xhr.responseType = 'json';
     xhr.open('GET', url + '/folders');
+    xhr.responseType = 'json';
     xhr.onload = function() {
         this.status.set('status', 'connected');
         this.status.set('folders', xhr.response.folders);
@@ -52,8 +52,8 @@ FolderContents.prototype.update = function(server, folder) {
     }
 
     var xhr = new XMLHttpRequest;
-    xhr.responseType = 'json';
     xhr.open('GET', server + '/contents?' + $.param({'folder': folder}));
+    xhr.responseType = 'json';
     xhr.onload = function() {
         this.pictures.set('pictures', xhr.response.pictures);
     }.bind(this);
@@ -88,7 +88,7 @@ function link(model, field, handler) {
     link(connection.status, 'status', function(_, status) {
         $('.server-status-text').text(status);
         $folders.prop('disabled', status !== 'connected');
-        $('.include-subfolders').prop('disabled', status !== 'connected');
+        $('#include-subfolders').prop('disabled', status !== 'connected');
     });
 
     link(connection.status, 'folders', function(_, folders) {
@@ -108,13 +108,26 @@ function link(model, field, handler) {
 
     link(contents.pictures, 'pictures', function(_, pictures) {
         var folder = currentFolder.get('folder');
-        
+        if (pictures.length > 0) {
+            var picture = pictures[0];
+            var url = $serverSelection.val() + '/photo?' + $.param({'folder': folder, 'photo': picture.name});
+            $('#current-picture').attr({'src': url});
+        }
+
+        if (pictures.length > 1) {
+            var picture = pictures[1];
+            var url = $serverSelection.val() + '/photo?' + $.param({'folder': folder, 'photo': picture.name});
+            $('#next-picture').attr({'src': url});
+        }
+
+        /*
         $pictures.empty();
         pictures.forEach(function(picture) {
             var img = $('<img>');
             img.attr({'src': $serverSelection.val() + '/photo?' + $.param({'folder': folder, 'photo': picture.name})});
             $pictures.append(img);
         });
+        */
     });
 
     $serverSelection.change(function() {
@@ -124,7 +137,7 @@ function link(model, field, handler) {
     });
 
     function updateCurrentFolder() {
-        var selected = $('.folders option:selected');
+        var selected = $('.folders option').filter(':selected');
         if (selected.length) {
             currentFolder.set('folder', $(selected[0]).text());
         } else {

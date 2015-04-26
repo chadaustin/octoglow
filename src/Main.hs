@@ -2,67 +2,110 @@
 
 module Main (main) where
 
-import Data.IORef
-import System.FilePath (combine)
-import Control.Monad (forM_, when)
-import System.Environment (getArgs)
+import Control.Monad (filterM, forM_, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT, asks)
-import Network.Wai
-import Network.HTTP.Types
-import System.Directory
+import Data.Aeson ((.=))
+import Data.Char (toLower)
+import Data.IORef
 import Data.List (intercalate, sort)
+import Debug.Trace (traceM)
+import Network.HTTP.Types
+import Network.Wai
+import System.Directory
+import System.Environment (getArgs)
+import System.FilePath (combine, takeExtension)
+import qualified Data.Aeson as Json
 import qualified Data.ByteString.Char8 as BSC
-import qualified Network.Wai.Handler.Warp as Warp
 import qualified Data.ByteString.Lazy as BSL
+import qualified Network.Wai.Handler.Warp as Warp
 
 data AppState = AppState
-                { pictureRoot :: !FilePath
+                { asPictureRoot :: !FilePath
+                , asRequest :: !Request
                 }
 
 type Handler = ReaderT AppState IO
 
---newtype Generator a = Generator (IO (a, Maybe (Generator a)))
-
-listDirectories' :: IORef [FilePath] -> FilePath -> IO ()
-listDirectories' out root = do
+listDirectories' :: IORef [FilePath] -> FilePath -> FilePath -> IO ()
+listDirectories' out root prefix = do
     contents <- getDirectoryContents root
     forM_ contents $ \entry -> do
         let fe = combine root entry
         isdir <- doesDirectoryExist fe
         when (isdir && entry /= "." && entry /= "..") $ do
-            modifyIORef out (fe:)
-            listDirectories' out fe
+            let oe = combine prefix entry
+            modifyIORef out (oe:)
+            listDirectories' out fe oe
 
-listDirectories :: FilePath -> IO [FilePath]
-listDirectories root = do
+listDirectories :: FilePath -> FilePath -> IO [FilePath]
+listDirectories root prefix = do
     rv <- newIORef []
-    listDirectories' rv root
+    listDirectories' rv root prefix
     out <- readIORef rv
     return $ sort $ reverse out
 
+readFolderContents :: FilePath -> FilePath -> IO [FilePath]
+readFolderContents root prefix = do
+    let fp = combine root prefix
+    contents <- getDirectoryContents fp
+
+    let isJPEG :: FilePath -> IO Bool
+        isJPEG p = do
+            isFile <- doesFileExist $ combine fp p
+            return $ isFile && (map toLower (takeExtension p) `elem` [".jpeg", ".jpg"])
+    
+    filterM isJPEG contents
+
+jsonResponse :: Json.Value -> Response
+jsonResponse v =
+    responseLBS status200 [] $ Json.encode v
+
 getFoldersR :: Handler Response
 getFoldersR = do
-    root <- asks pictureRoot
-    directories <- lift $ listDirectories root
-    
-    return $ responseLBS status200 [] $ BSL.fromStrict $ BSC.intercalate "\n" $ map BSC.pack directories
+    root <- asks asPictureRoot
+    directories <- lift $ listDirectories root ""
 
-app :: AppState -> Application
-app state req respond = do
+    return $ jsonResponse $ Json.object [("folders" .= directories)]
+
+notFound :: Handler Response
+notFound = do
+    return $ responseLBS status404 [] "Not found"
+
+getContentsR :: Handler Response
+getContentsR = do
+    root <- asks asPictureRoot
+    queries <- fmap queryString $ asks asRequest
+    let mfolder = lookup "folder" queries
+    case mfolder of
+        Just (Just folder) -> do
+            contents <- lift $ readFolderContents root (BSC.unpack folder)
+            return $ jsonResponse $ Json.object ["pictures" .= contents]
+        Nothing -> notFound
+
+route :: Handler Response
+route = do
+    req <- asks asRequest
+    case pathInfo req of
+        ["folders"] -> getFoldersR
+        ["contents"] -> getContentsR
+        _ -> notFound
+
+app :: FilePath -> Application
+app proot req respond = do
     if (requestMethod req /= "GET") then do
-        respond $ responseLBS status404 [] "Method not supported"
+        respond $ responseLBS status405 [] "Method not supported"
     else do
-        case pathInfo req of
-            ["folders"] -> (runReaderT getFoldersR state) >>= respond
-            _ -> respond $ responseLBS status404 [] "Not found"
+        let state = AppState { asPictureRoot = proot, asRequest = req }
+        response <- runReaderT route state
+        respond response
 
-readState :: IO AppState
-readState = do
+readArgs :: IO FilePath
+readArgs = do
     [root] <- getArgs
-    return $ AppState { pictureRoot = root }
+    return $ root
 
 main :: IO ()
 main = do
-    state <- readState
-    Warp.run 9999 $ app state
+    proot <- readArgs
+    Warp.run 9999 $ app proot

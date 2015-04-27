@@ -67,6 +67,41 @@ FolderContents.prototype.update = function(server, folder) {
     this.currentXHR = xhr;
 };
 
+function Slideshow(contents) {
+    this.interval = 5000;
+
+    $('#picture-wrapper-a').on('transitionend', function() {
+        this.prepareNextPicture();
+    }.bind(this));
+
+    link(contents, 'pictures', function(_, pictures) {
+        var oldPictures = this.pictures;
+        this.pictures = pictures;
+        if ((oldPictures === undefined || oldPictures.length === 0) && pictures.length > 0) {
+            this.prepareNextPicture();
+        }
+    }.bind(this));
+}
+
+Slideshow.prototype.prepareNextPicture = function() {
+    var active = $('#picture-wrapper-a').hasClass('active');
+    var $next = $(active ? '#picture-b' : '#picture-a');
+
+    // random
+    var picture = this.pictures[Math.floor(Math.random() * this.pictures.length)];
+    if (picture === undefined) {
+        debugger;
+    }
+    
+    var url = $('#server-selection').val() + '/photo?' + $.param({'folder': picture.folder, 'photo': picture.name});
+    $next.attr({'src': url});
+    $next.one('load', function() {
+        setTimeout(function() {
+            $('#picture-wrapper-a').toggleClass('active');
+        }.bind(this), this.interval);
+    }.bind(this));
+}
+
 function link(model, field, handler) {
     model.on('change:' + field, handler);
     handler(model, model.get(field));
@@ -75,10 +110,11 @@ function link(model, field, handler) {
 (function() {
     // application models
     var connection = new ServerConnection;
-    var contents = new FolderContents;
     var currentFolder = new Backbone.Model({
         folder: null
     });
+    var contents = new FolderContents;
+    var slideshow = new Slideshow(contents.pictures);
 
     // elements
     var $serverSelection = $('#server-selection');
@@ -104,30 +140,6 @@ function link(model, field, handler) {
 
     link(currentFolder, 'folder', function(_, folder) {
         contents.update($serverSelection.val(), folder);
-    });
-
-    link(contents.pictures, 'pictures', function(_, pictures) {
-        var folder = currentFolder.get('folder');
-        if (pictures.length > 0) {
-            var picture = pictures[0];
-            var url = $serverSelection.val() + '/photo?' + $.param({'folder': folder, 'photo': picture.name});
-            $('#current-picture').attr({'src': url});
-        }
-
-        if (pictures.length > 1) {
-            var picture = pictures[1];
-            var url = $serverSelection.val() + '/photo?' + $.param({'folder': folder, 'photo': picture.name});
-            $('#next-picture').attr({'src': url});
-        }
-
-        /*
-        $pictures.empty();
-        pictures.forEach(function(picture) {
-            var img = $('<img>');
-            img.attr({'src': $serverSelection.val() + '/photo?' + $.param({'folder': folder, 'photo': picture.name})});
-            $pictures.append(img);
-        });
-        */
     });
 
     $serverSelection.change(function() {

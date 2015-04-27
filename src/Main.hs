@@ -59,7 +59,7 @@ readFolderContents root prefix = do
 
 jsonResponse :: Json.Value -> Response
 jsonResponse v =
-    responseLBS status200 [] $ Json.encode v
+    responseLBS status200 [("Access-Control-Allow-Origin", "*")] $ Json.encode v
 
 getFoldersR :: Handler Response
 getFoldersR = do
@@ -80,8 +80,24 @@ getContentsR = do
     case mfolder of
         Just (Just folder) -> do
             contents <- lift $ readFolderContents root (BSC.unpack folder)
-            return $ jsonResponse $ Json.object ["pictures" .= contents]
+            let objects = [Json.object
+                           [ "folder" .= BSC.unpack folder
+                           , "name" .= f
+                           ] | f <- contents]
+            return $ jsonResponse $ Json.object ["pictures" .= objects]
         Nothing -> notFound
+
+getPhotoR :: Handler Response
+getPhotoR = do
+    root <- asks asPictureRoot
+    queries <- fmap queryString $ asks asRequest
+    let mfolder = lookup "folder" queries
+    let mphoto = lookup "photo" queries
+    case (mfolder, mphoto) of
+        (Just (Just folder), Just (Just photo)) -> do
+            contents <- lift $ BSL.readFile $ combine root (combine (BSC.unpack folder) (BSC.unpack photo))
+            return $ responseLBS status200 [("Content-Type", "image/jpeg")] contents
+        _ -> notFound
 
 route :: Handler Response
 route = do
@@ -89,6 +105,7 @@ route = do
     case pathInfo req of
         ["folders"] -> getFoldersR
         ["contents"] -> getContentsR
+        ["photo"] -> getPhotoR
         _ -> notFound
 
 app :: FilePath -> Application

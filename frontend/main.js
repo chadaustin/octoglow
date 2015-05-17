@@ -1,71 +1,76 @@
-function ServerConnection() {
-    this.status = new Backbone.Model({
-        status: 'disconnected',
-        folders: [],
-    });
-
-    this.currentXHR = null;
-}
-
-ServerConnection.prototype.connect = function(url) {
-    if (this.currentXHR) {
-        this.currentXHR.abort();
+var ServerConnection = Backbone.Model.extend({
+    initialize: function() {
         this.currentXHR = null;
-    }
 
-    var xhr = new XMLHttpRequest;
-    xhr.open('GET', url + '/folders');
-    xhr.responseType = 'json';
-    xhr.onload = function() {
-        this.status.set('status', 'connected');
-        this.status.set('folders', xhr.response.folders);
-    }.bind(this);
-    xhr.onerror = function() {
-        this.status.set('status', 'failed');
-        this.status.set('folders', []);
-    }.bind(this);
-    xhr.onabort = function() {
-        this.status.set('status', 'aborted');
-        this.status.set('folders', []);
-    }.bind(this);
-    xhr.send();
-    this.currentXHR = xhr;
-};
+        this.set({
+            status: 'disconnected',
+            folders: [],
+        });
+    },
 
-function FolderContents() {
-    this.pictures = new Backbone.Model({
-        'pictures': [],
-    });
+    connect: function(url) {
+        if (this.currentXHR) {
+            this.currentXHR.abort();
+            this.currentXHR = null;
+        }
 
-    this.currentXHR = null;
-}
+        this.set('status', 'connecting...')
+        var xhr = new XMLHttpRequest;
+        xhr.open('GET', url + '/folders');
+        xhr.responseType = 'json';
+        xhr.onload = function() {
+            this.set('status', 'connected');
+            this.set('folders', xhr.response.folders);
+        }.bind(this);
+        xhr.onerror = function() {
+            this.set('status', 'failed');
+            this.set('folders', []);
+        }.bind(this);
+        xhr.onabort = function() {
+            this.set('status', 'aborted');
+            this.set('folders', []);
+        }.bind(this);
+        xhr.send();
+        this.currentXHR = xhr;
+    },
+});
 
-FolderContents.prototype.update = function(server, folder) {
-    if (this.currentXHR) {
-        this.currentXHR.abort();
+var FolderContents = Backbone.Model.extend({
+    initialize: function() {
+        this.set({
+            pictures: [],
+        });
+
         this.currentXHR = null;
-    };
+    },
 
-    if (folder === null) {
-        this.pictures.set('pictures', []);
-        return;
-    }
+    update: function(server, folder) {
+        if (this.currentXHR) {
+            this.currentXHR.abort();
+            this.currentXHR = null;
+        };
 
-    var xhr = new XMLHttpRequest;
-    xhr.open('GET', server + '/contents?' + $.param({'folder': folder}));
-    xhr.responseType = 'json';
-    xhr.onload = function() {
-        this.pictures.set('pictures', xhr.response.pictures);
-    }.bind(this);
-    xhr.onerror = function() {
-        this.pictures.set('pictures', []);
-    }.bind(this);
-    xhr.onabort = function() {
-        this.pictures.set('pictures', []);
-    }.bind(this);
-    xhr.send();
-    this.currentXHR = xhr;
-};
+        if (folder === null) {
+            this.set('pictures', []);
+            return;
+        }
+
+        var xhr = new XMLHttpRequest;
+        xhr.open('GET', server + '/contents?' + $.param({'folder': folder}));
+        xhr.responseType = 'json';
+        xhr.onload = function() {
+            this.set('pictures', xhr.response.pictures);
+        }.bind(this);
+        xhr.onerror = function() {
+            this.set('pictures', []);
+        }.bind(this);
+        xhr.onabort = function() {
+            this.set('pictures', []);
+        }.bind(this);
+        xhr.send();
+        this.currentXHR = xhr;
+    },
+});
 
 function Slideshow(contents) {
     this.interval = 5000;
@@ -114,20 +119,20 @@ function link(model, field, handler) {
         folder: null
     });
     var contents = new FolderContents;
-    var slideshow = new Slideshow(contents.pictures);
+    var slideshow = new Slideshow(contents);
 
     // elements
     var $serverSelection = $('#server-selection');
     var $folders = $('.folders');
     var $pictures = $('.pictures');
 
-    link(connection.status, 'status', function(_, status) {
+    link(connection, 'status', function(_, status) {
         $('.server-status-text').text(status);
         $folders.prop('disabled', status !== 'connected');
         $('#include-subfolders').prop('disabled', status !== 'connected');
     });
 
-    link(connection.status, 'folders', function(_, folders) {
+    link(connection, 'folders', function(_, folders) {
         $folders.empty();
         folders.forEach(function(folder) {
             var option = $('<option>');

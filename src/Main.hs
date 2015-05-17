@@ -18,6 +18,7 @@ import System.FilePath (combine, takeExtension)
 import qualified Data.Aeson as Json
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
+import qualified Data.Text as Text
 import qualified Network.Wai.Handler.Warp as Warp
 
 data AppState = AppState
@@ -40,7 +41,7 @@ listDirectories' out root prefix = do
 
 listDirectories :: FilePath -> FilePath -> IO [FilePath]
 listDirectories root prefix = do
-    rv <- newIORef []
+    rv <- newIORef ["."]
     listDirectories' rv root prefix
     out <- readIORef rv
     return $ sort $ reverse out
@@ -102,6 +103,7 @@ getPhotoR = do
 route :: Handler Response
 route = do
     req <- asks asRequest
+    lift $ putStrLn $ Text.unpack $ Text.intercalate "/" $ pathInfo req
     case pathInfo req of
         ["folders"] -> getFoldersR
         ["contents"] -> getContentsR

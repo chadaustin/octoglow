@@ -4,6 +4,7 @@ var ServerConnection = Backbone.Model.extend({
 
         this.set({
             status: 'disconnected',
+            server: null,
             folders: [],
         });
     },
@@ -19,16 +20,23 @@ var ServerConnection = Backbone.Model.extend({
         xhr.open('GET', url + '/folders');
         xhr.responseType = 'json';
         xhr.onload = function() {
-            this.set('status', 'connected');
-            this.set('folders', xhr.response.folders);
+            this.set({
+                status: 'connected',
+                server: url,
+                folders: xhr.response.folders,
+            });
         }.bind(this);
         xhr.onerror = function() {
-            this.set('status', 'failed');
-            this.set('folders', []);
+            this.set({
+                status: 'failed',
+                folders: [],
+            });
         }.bind(this);
         xhr.onabort = function() {
-            this.set('status', 'aborted');
-            this.set('folders', []);
+            this.set({
+                status: 'aborted',
+                folders: [],
+            });
         }.bind(this);
         xhr.send();
         this.currentXHR = xhr;
@@ -36,6 +44,17 @@ var ServerConnection = Backbone.Model.extend({
 });
 
 var FolderContents = Backbone.Model.extend({
+    constructor: function(connection, currentFolder) {
+        this.connection = connection;
+        this.currentFolder = currentFolder;
+        Backbone.Model.apply(this, arguments);
+
+        this.connection.on('change:server', this._update, this);
+        this.currentFolder.on('change:folder', this._update, this);
+
+        this._update();
+    },
+
     initialize: function() {
         this.set({
             pictures: [],
@@ -44,13 +63,19 @@ var FolderContents = Backbone.Model.extend({
         this.currentXHR = null;
     },
 
-    update: function(server, folder) {
+    _update: function() {
         if (this.currentXHR) {
             this.currentXHR.abort();
             this.currentXHR = null;
         };
 
-        if (folder === null) {
+        var server = this.connection.get('server');
+        if (!this.server) {
+            this.set('pictures', []);
+        }
+
+        var folder = this.currentFolder.get('folder');
+        if (folder == null) {
             this.set('pictures', []);
             return;
         }
@@ -118,7 +143,7 @@ function link(model, field, handler) {
     var currentFolder = new Backbone.Model({
         folder: null
     });
-    var contents = new FolderContents;
+    var contents = new FolderContents(connection, currentFolder);
     var slideshow = new Slideshow(contents);
 
     // elements
@@ -141,10 +166,6 @@ function link(model, field, handler) {
         });
 
         updateCurrentFolder();
-    });
-
-    link(currentFolder, 'folder', function(_, folder) {
-        contents.update($serverSelection.val(), folder);
     });
 
     $serverSelection.change(function() {

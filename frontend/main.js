@@ -97,40 +97,98 @@ var FolderContents = Backbone.Model.extend({
     },
 });
 
-function Slideshow(contents) {
-    this.interval = 5000;
-
-    $('#picture-wrapper-a').on('transitionend', function() {
-        this.prepareNextPicture();
-    }.bind(this));
-
-    link(contents, 'pictures', function(_, pictures) {
-        var oldPictures = this.pictures;
-        this.pictures = pictures;
-        if ((oldPictures === undefined || oldPictures.length === 0) && pictures.length > 0) {
-            this.prepareNextPicture();
-        }
-    }.bind(this));
+function TransitionManager() {
+    this.$front = $('#picture-wrapper-a');
+    this.$back = $('#picture-wrapper-b');
+    this.hasPhoto = false;
 }
 
-Slideshow.prototype.prepareNextPicture = function() {
-    var active = $('#picture-wrapper-a').hasClass('active');
-    var $next = $(active ? '#picture-b' : '#picture-a');
+TransitionManager.prototype.forceShowPhoto = function(img) {
+    $('.picture-wrapper').empty();
+    this.$front.append(img);
+    this.hasPhoto = true;
+};
 
-    // random
-    var picture = this.pictures[Math.floor(Math.random() * this.pictures.length)];
-    if (picture === undefined) {
-        debugger;
+TransitionManager.prototype.transitionToPhoto = function(img) {
+    if (!this.hasPhoto) {
+        this.forceShowPhoto(img);
+    } else {
+        this.$back.empty().append(img);
+        $('#picture-wrapper-a').toggleClass('active');
+        var tmp = this.$back;
+        this.$back = this.$front;
+        this.$front = tmp;
     }
+};
+
+function RandomPhotoSequence(pictures) {
+    this.pictures = _.shuffle(pictures);
+    this.index = 0;
+}
+
+RandomPhotoSequence.prototype.getNextPhoto = function() {
+    if (this.pictures.length === 0) {
+        return undefined;
+    }
+
+    var i = this.index;
+    this.index = (i + 1) % this.pictures.length;
+    return this.pictures[i];
+};
+
+function Slideshow(contents) {
+    this.transitionManager = new TransitionManager;
+
+    this.interval = 5000;
+    this.currentImage = undefined;
+    this.timerID = undefined;
     
-    var url = $('#server-selection').val() + '/photo?' + $.param({'folder': picture.folder, 'photo': picture.name});
-    $next.attr({'src': url});
-    $next.one('load', function() {
-        setTimeout(function() {
-            $('#picture-wrapper-a').toggleClass('active');
-        }.bind(this), this.interval);
+    link(contents, 'pictures', function(_, pictures) {
+        this.pictures = new RandomPhotoSequence(pictures);
+        this.prepareNextPicture(true);
     }.bind(this));
 }
+
+Slideshow.prototype.prepareNextPicture = function(immediate) {
+    if (this.currentImage !== undefined) {
+        this.currentImage.neutered = true;
+        this.currentImage = undefined;
+    }
+
+    if (this.timerID !== undefined) {
+        clearTimeout(this.timerID);
+        this.timerID = undefined;
+    }
+
+    var picture = this.pictures.getNextPhoto();
+    if (picture === undefined) {
+        return;
+    }
+    var url = $('#server-selection').val() + '/photo?' + $.param({'folder': picture.folder, 'photo': picture.name});
+
+    var cont = function cont() {
+        if (img.neutered) {
+            return;
+        }
+        if (immediate) {
+            this.transitionManager.forceShowPhoto(img);
+        } else {
+            this.transitionManager.transitionToPhoto(img);
+        }
+
+        this.timerID = setTimeout(function() {
+            this.prepareNextPicture(false);
+        }.bind(this), this.interval);
+    }.bind(this);
+
+    var img = document.createElement('img');
+    this.currentImage = img;
+    img.addEventListener('load', cont);
+    img.addEventListener('error', cont);
+    img.addEventListener('abort', cont);
+    img.className = 'picture';
+    img.src = url;
+};
 
 function link(model, field, handler) {
     model.on('change:' + field, handler);
@@ -168,10 +226,19 @@ function link(model, field, handler) {
         updateCurrentFolder();
     });
 
-    $serverSelection.change(function() {
-        var server = $(this).val();
+    function reconnect() {
+        var server = $serverSelection.val();
         localStorage.setItem('server', server);
         connection.connect(server);
+    }
+
+    $serverSelection.change(function() {
+        reconnect();
+    });
+    $serverSelection.keydown(function(event) {
+        if (event.keyCode === 13) {
+            reconnect();
+        }
     });
 
     function updateCurrentFolder() {
@@ -186,8 +253,6 @@ function link(model, field, handler) {
     $folders.change(function() {
         updateCurrentFolder();
     });
-
-
 
     // load previous state
     var previousServer = localStorage.getItem('server');

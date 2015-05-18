@@ -18,12 +18,13 @@ var ServerConnection = Backbone.Model.extend({
         this.set('status', 'connecting...')
         var xhr = new XMLHttpRequest;
         xhr.open('GET', url + '/folders');
-        xhr.responseType = 'json';
         xhr.onload = function() {
+            // IE11 doesn't support responseType = 'json'
+            var response = JSON.parse(xhr.responseText);
             this.set({
                 status: 'connected',
                 server: url,
-                folders: xhr.response.folders,
+                folders: response.folders,
             });
         }.bind(this);
         xhr.onerror = function() {
@@ -82,9 +83,10 @@ var FolderContents = Backbone.Model.extend({
 
         var xhr = new XMLHttpRequest;
         xhr.open('GET', server + '/contents?' + $.param({'folder': folder}));
-        xhr.responseType = 'json';
         xhr.onload = function() {
-            this.set('pictures', xhr.response.pictures);
+            // IE11 doesn't support responseType = 'json'
+            var response = JSON.parse(xhr.responseText);
+            this.set('pictures', response.pictures);
         }.bind(this);
         xhr.onerror = function() {
             this.set('pictures', []);
@@ -266,8 +268,14 @@ function link(model, field, handler) {
 
     // load previous state
     var previousServer = localStorage.getItem('server');
+    if (previousServer === null) {
+        previousServer = document.location.toString();
+        if (previousServer[previousServer.length - 1] == '/') {
+            previousServer = previousServer.substr(0, previousServer.length - 1);
+        }
+    }
     if (previousServer !== null) {
         $serverSelection.val(previousServer);
         $serverSelection.change();
-    }    
+    }
 })();

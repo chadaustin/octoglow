@@ -136,10 +136,10 @@ RandomPhotoSequence.prototype.getNextPhoto = function() {
     return this.pictures[i];
 };
 
-function Slideshow(contents) {
+function Slideshow(interval, contents) {
     this.transitionManager = new TransitionManager;
 
-    this.interval = 5000;
+    this.interval = interval;
     this.currentImage = undefined;
     this.timerID = undefined;
     
@@ -178,7 +178,7 @@ Slideshow.prototype.prepareNextPicture = function(immediate) {
 
         this.timerID = setTimeout(function() {
             this.prepareNextPicture(false);
-        }.bind(this), this.interval);
+        }.bind(this), this.interval.get('milliseconds'));
     }.bind(this);
 
     var img = document.createElement('img');
@@ -202,12 +202,16 @@ function link(model, field, handler) {
         folder: null
     });
     var contents = new FolderContents(connection, currentFolder);
-    var slideshow = new Slideshow(contents);
+    var interval = new Backbone.Model({
+        milliseconds: 5000
+    });
+    var slideshow = new Slideshow(interval, contents);
 
     // elements
     var $serverSelection = $('#server-selection');
     var $folders = $('.folders');
     var $pictures = $('.pictures');
+    var $interval = $('.interval-slider');
 
     link(connection, 'status', function(_, status) {
         $('.server-status-text').text(status);
@@ -240,6 +244,12 @@ function link(model, field, handler) {
             reconnect();
         }
     });
+
+    $interval.on('input change', function() {
+        interval.set('milliseconds', Math.floor($interval.val() * 1000));
+        $('.interval-text').text($interval.val() + 's');
+    });
+    $interval.change();
 
     function updateCurrentFolder() {
         var selected = $('.folders option').filter(':selected');

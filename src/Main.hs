@@ -103,14 +103,41 @@ getPhotoR = do
             return $ responseLBS status200 [("Content-Type", "image/jpeg")] contents
         _ -> notFound
 
+getIndexR :: Handler Response
+getIndexR = getFrontendAssetR "index.html"
+
+getFrontendAssetR :: Text.Text -> Handler Response
+getFrontendAssetR name = do
+    let fullPath = combine "frontend" (Text.unpack name)
+    exists <- lift $ doesFileExist $ fullPath
+    if exists then do
+        contents <- lift $ BSL.readFile fullPath
+        let contentType = case takeExtension (Text.unpack name) of
+                ".html" -> Just "text/html"
+                ".css" -> Just "text/css"
+                ".js" -> Just "text/javascript"
+                _ -> Nothing
+        let headers = case contentType of
+                Just ct -> [("Content-Type", ct)]
+                Nothing -> []
+        return $ responseLBS status200 headers contents
+    else
+        notFound
+                    
+
 route :: Handler Response
 route = do
     req <- asks asRequest
     lift $ putStrLn $ Text.unpack $ Text.intercalate "/" $ pathInfo req
     case pathInfo req of
+        -- services
         ["folders"] -> getFoldersR
         ["contents"] -> getContentsR
         ["photo"] -> getPhotoR
+
+        -- frontend
+        [] -> getIndexR
+        [asset] -> getFrontendAssetR asset
         _ -> notFound
 
 app :: FilePath -> Application

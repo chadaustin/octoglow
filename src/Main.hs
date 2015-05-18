@@ -18,6 +18,7 @@ import System.FilePath (combine, takeExtension)
 import qualified Data.Aeson as Json
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
+import qualified Data.List as List
 import qualified Data.Text as Text
 import qualified Network.Wai.Handler.Warp as Warp
 
@@ -54,7 +55,9 @@ readFolderContents root prefix = do
     let isJPEG :: FilePath -> IO Bool
         isJPEG p = do
             isFile <- doesFileExist $ combine fp p
-            return $ isFile && (map toLower (takeExtension p) `elem` [".jpeg", ".jpg"])
+            let endsWithJPEG = map toLower (takeExtension p) `elem` [".jpeg", ".jpg"]
+                stupid = List.isPrefixOf "._" p
+            return $ isFile && endsWithJPEG && not stupid
     
     filterM isJPEG contents
 

@@ -247,10 +247,12 @@ function link(model, field, handler) {
         }
     });
 
-    $interval.on('input change', function() {
+    var interval_changed = function() {
         interval.set('milliseconds', Math.floor($interval.val() * 1000));
         $('.interval-text').text($interval.val() + 's');
-    });
+    };
+    $interval.on('input', interval_changed);
+    $interval.change(interval_changed);
     $interval.change();
 
     function updateCurrentFolder() {

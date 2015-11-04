@@ -1,0 +1,30 @@
+declare require: (String) -> a;
+
+declare process: {
+    argv: Array String,
+};
+
+let http = require("http");
+let console = require("console");
+
+let PORT = 9999;
+
+fun handleRequest(request, response) {
+    response.end("Path Hit: " + request.url);
+    return ();
+}
+
+let server = http.createServer(handleRequest);
+
+fun main() {
+    each(process.argv, fun(p) {
+        console.log("arg: " + p);
+    });
+
+    server.listen(PORT, fun() {
+        console.log("Server listening on: http://localhost:%s", PORT);
+    });
+}
+
+let _ = main();
+

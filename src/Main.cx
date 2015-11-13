@@ -7,24 +7,37 @@ declare process: {
 let http = require("http");
 let console = require("console");
 
-let PORT = 9999;
+let port = 9999;
 
-fun handleRequest(request, response) {
-    response.end("Path Hit: " + request.url);
-    return ();
+fun errorResponse(response, statusCode: Number, statusMessage: String): Unit {
+    response.statusCode = statusCode;
+    response.statusMessage = statusMessage;
+    response.end(toString(statusCode) + " - " + statusMessage);
 }
 
-let server = http.createServer(handleRequest);
+fun handleRequest(request, response) {
+    if request.method != "GET" {
+        return errorResponse(response, 405, "Method not supported");
+    };
+
+    let root = get(process.argv, 2);
+
+    if request.url == "/folders" {
+    } else if request.url == "/contents" {
+    } else if request.url == "/photo" {
+    } else if request.url == "/" {
+    } else if request.url == "/asset" {
+    } else {
+        return errorResponse(response, 404, "Not found");
+    };
+}
 
 fun main() {
-    each(process.argv, fun(p) {
-        console.log("arg: " + p);
-    });
+    let server = http.createServer(handleRequest);
 
-    server.listen(PORT, fun() {
-        console.log("Server listening on: http://localhost:%s", PORT);
+    server.listen(port, fun() {
+        console.log("Server listening on: http://localhost:%s", port);
     });
 }
 
 let _ = main();
-

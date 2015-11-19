@@ -6,6 +6,7 @@ declare process: {
 
 let http = require("http");
 let console = require("console");
+let fs = require("fs");
 
 let port = 9999;
 
@@ -13,6 +14,24 @@ fun errorResponse(response, statusCode: Number, statusMessage: String): Unit {
     response.statusCode = statusCode;
     response.statusMessage = statusMessage;
     response.end(toString(statusCode) + " - " + statusMessage);
+}
+
+fun successResponse(response, content: String) {
+    response.statusCode = 200;
+    response.statusMessage = "OK";
+    response.end(content);
+}
+
+fun handleFoldersRequest(response, root) {
+    let rv = [];
+    let contents = fs.readdirSync(root);
+/*
+    for name in contents {
+        if name->endswith('.jpeg') {
+            rv->append(name);
+        };
+    };
+*/
 }
 
 fun handleRequest(request, response) {
@@ -23,9 +42,11 @@ fun handleRequest(request, response) {
     let root = get(process.argv, 2);
 
     if request.url == "/folders" {
+        handleFoldersRequest(response, root);
     } else if request.url == "/contents" {
     } else if request.url == "/photo" {
     } else if request.url == "/" {
+        return successResponse(response, "<html><body>data!</body></html>");
     } else if request.url == "/asset" {
     } else {
         return errorResponse(response, 404, "Not found");

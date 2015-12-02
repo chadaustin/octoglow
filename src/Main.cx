@@ -24,14 +24,26 @@ fun successResponse(response, content: String) {
 
 fun handleFoldersRequest(response, root) {
     let rv = [];
-    let contents = fs.readdirSync(root);
-/*
+    let contents: Array String = fs.readdirSync(root);
+    
+    /*
+    contents->each(fun(name) {
+    });
+    */
+
+    /*
     for name in contents {
-        if name->endswith('.jpeg') {
+        if name->endswith(".jpeg") {
+            /*
             rv->append(name);
+            */
         };
     };
-*/
+    */
+
+    each(contents, fun(name: String) {
+        rv->append(name);
+    });
 }
 
 fun handleRequest(request, response) {

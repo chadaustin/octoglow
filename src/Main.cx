@@ -70,23 +70,57 @@ let renderJSON: (JSONValue) -> String = _unsafe_js("JSON.stringify");
 
 /* END JSON */
 
+/* BEGIN DIRECTORY LIST */
+
+fun combine(a: String, b) {
+    if a->endsWith("/") {
+        return a + b;
+    } else {
+        return a + "/" + b;
+    };
+}
+
+fun listDirectoriesInner(output: Array String, root, prefix) {
+    //print("prefix: " + prefix);
+
+    output->append(prefix);
+
+    let here = combine(root, prefix);
+    let contents: Array String = fs.readdirSync(here);
+    for entry in contents {
+        let absEntry = combine(here, entry);
+        let stat = fs.lstatSync(absEntry);
+        if stat.isDirectory() {
+            listDirectoriesInner(output, root, combine(prefix, entry));
+        };
+    };
+}
+
+fun listDirectories(root) {
+    let rv = [];
+    listDirectoriesInner(rv, root, ".");
+    rv->sort();
+    return rv;
+}
+
+/* END DIRECTORY LIST */
+
 fun handleFoldersRequest(response, root: String) {
+    let rv = listDirectories(root);
+
+    /*
     let rv = [];
     let contents: Array String = fs.readdirSync(root);
 
     for name in contents {
-        print(name);
         if name->endsWith(".jpeg") || name->endsWith(".jpg") {
-            print("again: name: " + name);
             rv->append(name);
         };
     };
-
-    print(rv);
+    */
 
     let folders = encodeArray(map(encodeString, rv));
     let responseJSON = encodeObject([ObjectMember("folders", folders)]);
-
 
     response.statusCode = 200;
     response.statusMessage = "OK";

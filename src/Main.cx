@@ -108,23 +108,15 @@ fun listDirectories(root) {
 fun handleFoldersRequest(response, root: String) {
     let rv = listDirectories(root);
 
-    /*
-    let rv = [];
-    let contents: Array String = fs.readdirSync(root);
-
-    for name in contents {
-        if name->endsWith(".jpeg") || name->endsWith(".jpg") {
-            rv->append(name);
-        };
-    };
-    */
-
     let folders = encodeArray(map(encodeString, rv));
     let responseJSON = encodeObject([ObjectMember("folders", folders)]);
 
     response.statusCode = 200;
     response.statusMessage = "OK";
     response.end(renderJSON(responseJSON));
+}
+
+fun handleContentsRequest(response, root: String) {
 }
 
 fun handleRequest(request, response) {
@@ -137,6 +129,7 @@ fun handleRequest(request, response) {
     if request.url == "/folders" {
         handleFoldersRequest(response, root);
     } else if request.url == "/contents" {
+        handleContentsRequest(response, root);
     } else if request.url == "/photo" {
     } else if request.url == "/" {
         return successResponse(response, "<html><body>data!</body></html>");

@@ -7,6 +7,7 @@ declare process: {
 let http = require("http");
 let console = require("console");
 let fs = require("fs");
+let url = require("url");
 
 let port = 9999;
 
@@ -155,14 +156,18 @@ fun handleRequest(request, response) {
 
     let root = get(process.argv, 2);
 
-    if request.url == "/folders" {
+    let parsed = url.parse(request.url, True);
+    let pathName = parsed.pathname;
+
+    if pathName == "/folders" {
         handleFoldersRequest(response, root);
-    } else if request.url == "/contents" {
-        handleContentsRequest(response, root);
-    } else if request.url == "/photo" {
-    } else if request.url == "/" {
+    } else if pathName == "/contents" {
+        let folder = parsed.query.folder;
+        handleContentsRequest(response, root, folder);
+    } else if pathName == "/photo" {
+    } else if pathName == "/" {
         return successResponse(response, "<html><body>data!</body></html>");
-    } else if request.url == "/asset" {
+    } else if pathName == "/asset" {
     } else {
         return errorResponse(response, 404, "Not found");
     };

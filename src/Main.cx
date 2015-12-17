@@ -103,20 +103,49 @@ fun listDirectories(root) {
     return rv;
 }
 
+fun getFolderContents(folder) {
+    let rv = [];
+
+    let contents: Array String = fs.readdirSync(folder);
+    for entry in contents {
+        let absEntry = combine(folder, entry);
+        let stat = fs.lstatSync(absEntry);
+        if stat.isFile() && (entry->endsWith(".jpeg") || entry->endsWith(".jpg")) {
+            rv->append(entry);
+        };
+    };
+
+    return rv;
+}
+
 /* END DIRECTORY LIST */
 
 fun handleFoldersRequest(response, root: String) {
-    let rv = listDirectories(root);
+    let allFolders = listDirectories(root);
 
-    let folders = encodeArray(map(encodeString, rv));
-    let responseJSON = encodeObject([ObjectMember("folders", folders)]);
+    let folders = encodeArray(map(encodeString, allFolders));
+    let responseJSON = encodeObject(
+        [ObjectMember("folders", folders)]
+    );
 
     response.statusCode = 200;
     response.statusMessage = "OK";
     response.end(renderJSON(responseJSON));
 }
 
-fun handleContentsRequest(response, root: String) {
+fun handleContentsRequest(response, root: String, folder: String) {
+    let allFolders = listDirectories(root);
+    // TODO: verify folder is in allFolders
+
+    let contents = getFolderContents(combine(root, folder));
+    let c = encodeArray(map(encodeString, contents));
+    let responseJSON = encodeObject(
+        [ObjectMember("contents", c)]
+    );
+
+    response.statusCode = 200;
+    response.statusMessage = "OK";
+    response.end(renderJSON(responseJSON));
 }
 
 fun handleRequest(request, response) {

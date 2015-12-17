@@ -131,6 +131,7 @@ fun handleFoldersRequest(response, root: String) {
 
     response.statusCode = 200;
     response.statusMessage = "OK";
+    response.setHeader("Content-Type", "application/json");
     response.end(renderJSON(responseJSON));
 }
 
@@ -146,7 +147,21 @@ fun handleContentsRequest(response, root: String, folder: String) {
 
     response.statusCode = 200;
     response.statusMessage = "OK";
+    response.setHeader("Content-Type", "application/json");
     response.end(renderJSON(responseJSON));
+}
+
+fun handlePhotoRequest(response, root, folder, file) {
+    let allFolders = listDirectories(root);
+    // TODO: verify folder is in allFolders
+    let contents = getFolderContents(combine(root, folder));
+    // TODO: verify file is in contents
+
+    let d = fs.readFileSync(combine(combine(root, folder), file));
+    response.statusCode = 200;
+    response.statusMessage = "OK";
+    response.setHeader("Content-Type", "image/jpeg");
+    response.end(d);
 }
 
 fun handleRequest(request, response) {
@@ -165,6 +180,9 @@ fun handleRequest(request, response) {
         let folder = parsed.query.folder;
         handleContentsRequest(response, root, folder);
     } else if pathName == "/photo" {
+        let folder = parsed.query.folder;
+        let file = parsed.query.file;
+        handlePhotoRequest(response, root, folder, file);
     } else if pathName == "/" {
         return successResponse(response, "<html><body>data!</body></html>");
     } else if pathName == "/asset" {

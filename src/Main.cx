@@ -1,8 +1,8 @@
-declare require: (String) -> a;
+declare require: (String) -> a
 
 declare process: {
     argv: Array String,
-};
+}   
 
 let http = require("http")
 let console = require("console")
@@ -12,15 +12,15 @@ let url = require("url")
 let port = 9999
 
 fun errorResponse(response, statusCode: Number, statusMessage: String): Unit {
-    response.statusCode = statusCode;
-    response.statusMessage = statusMessage;
-    response.end(toString(statusCode) + " - " + statusMessage);
+    response.statusCode = statusCode
+    response.statusMessage = statusMessage
+    response.end(toString(statusCode) + " - " + statusMessage)
 }
 
 fun successResponse(response, content: String) {
-    response.statusCode = 200;
-    response.statusMessage = "OK";
-    response.end(content);
+    response.statusCode = 200
+    response.statusMessage = "OK"
+    response.end(content)
 }
 
 /* JSON: */
@@ -36,33 +36,33 @@ data ObjectMember {
 let setProperty = _unsafe_js("function(o, k, v) { o[k] = v; }")
 
 fun encodeObject(members: Array ObjectMember): JSONValue {
-    let v = _unsafe_js("{}");
+    let v = _unsafe_js("{}")
 
     // TODO: need irrefutable pattern matches in iteration
     for member in members {
         match member {
             ObjectMember(key, value) => setProperty(v, key, value);
-        };
-    };
+        }
+    }
 
-    return _unsafe_coerce(v);
+    return _unsafe_coerce(v)
 }
 
 fun encodeArray(v: Array JSONValue): JSONValue {
     // we know that the crux representation of arrays lines up with javascript
-    return _unsafe_coerce(v);
+    return _unsafe_coerce(v)
 }
 
 fun encodeString(v: String): JSONValue {
-    return _unsafe_coerce(v);
+    return _unsafe_coerce(v)
 }
 
 fun encodeNumber(v: Number): JSONValue {
-    return _unsafe_coerce(v);
+    return _unsafe_coerce(v)
 }
 
 fun encodeBoolean(v: Boolean): JSONValue {
-    return _unsafe_coerce(v);
+    return _unsafe_coerce(v)
 }
 
 let nullJSValue: JSONValue = _unsafe_js("null")
@@ -75,128 +75,126 @@ let renderJSON: (JSONValue) -> String = _unsafe_js("JSON.stringify")
 
 fun combine(a: String, b) {
     if a->endsWith("/") {
-        return a + b;
+        return a + b
     } else {
-        return a + "/" + b;
-    };
+        return a + "/" + b
+    }
 }
 
 fun listDirectoriesInner(output: Array String, root, prefix) {
-    //print("prefix: " + prefix);
+    output->append(prefix)
 
-    output->append(prefix);
-
-    let here = combine(root, prefix);
-    let contents: Array String = fs.readdirSync(here);
+    let here = combine(root, prefix)
+    let contents: Array String = fs.readdirSync(here)
     for entry in contents {
-        let absEntry = combine(here, entry);
-        let stat = fs.lstatSync(absEntry);
+        let absEntry = combine(here, entry)
+        let stat = fs.lstatSync(absEntry)
         if stat.isDirectory() {
-            listDirectoriesInner(output, root, combine(prefix, entry));
-        };
-    };
+            listDirectoriesInner(output, root, combine(prefix, entry))
+        }
+    }
 }
 
 fun listDirectories(root) {
-    let rv = [];
-    listDirectoriesInner(rv, root, ".");
-    rv->sort();
-    return rv;
+    let rv = []
+    listDirectoriesInner(rv, root, ".")
+    rv->sort()
+    return rv
 }
 
 fun getFolderContents(folder) {
-    let rv = [];
+    let rv = []
 
-    let contents: Array String = fs.readdirSync(folder);
+    let contents: Array String = fs.readdirSync(folder)
     for entry in contents {
-        let absEntry = combine(folder, entry);
-        let stat = fs.lstatSync(absEntry);
+        let absEntry = combine(folder, entry)
+        let stat = fs.lstatSync(absEntry)
         if stat.isFile() && (entry->endsWith(".jpeg") || entry->endsWith(".jpg")) {
-            rv->append(entry);
-        };
-    };
+            rv->append(entry)
+        }
+    }
 
-    return rv;
+    return rv
 }
 
 /* END DIRECTORY LIST */
 
 fun handleFoldersRequest(response, root: String) {
-    let allFolders = listDirectories(root);
+    let allFolders = listDirectories(root)
 
-    let folders = encodeArray(map(encodeString, allFolders));
+    let folders = encodeArray(map(encodeString, allFolders))
     let responseJSON = encodeObject(
         [ObjectMember("folders", folders)]
-    );
+    )
 
-    response.statusCode = 200;
-    response.statusMessage = "OK";
-    response.setHeader("Content-Type", "application/json");
-    response.end(renderJSON(responseJSON));
+    response.statusCode = 200
+    response.statusMessage = "OK"
+    response.setHeader("Content-Type", "application/json")
+    response.end(renderJSON(responseJSON))
 }
 
 fun handleContentsRequest(response, root: String, folder: String) {
-    let allFolders = listDirectories(root);
+    let allFolders = listDirectories(root)
     // TODO: verify folder is in allFolders
 
-    let contents = getFolderContents(combine(root, folder));
-    let c = encodeArray(map(encodeString, contents));
+    let contents = getFolderContents(combine(root, folder))
+    let c = encodeArray(map(encodeString, contents))
     let responseJSON = encodeObject(
         [ObjectMember("contents", c)]
-    );
+    )
 
-    response.statusCode = 200;
-    response.statusMessage = "OK";
-    response.setHeader("Content-Type", "application/json");
-    response.end(renderJSON(responseJSON));
+    response.statusCode = 200
+    response.statusMessage = "OK"
+    response.setHeader("Content-Type", "application/json")
+    response.end(renderJSON(responseJSON))
 }
 
 fun handlePhotoRequest(response, root, folder, file) {
-    let allFolders = listDirectories(root);
+    let allFolders = listDirectories(root)
     // TODO: verify folder is in allFolders
-    let contents = getFolderContents(combine(root, folder));
+    let contents = getFolderContents(combine(root, folder))
     // TODO: verify file is in contents
 
-    let d = fs.readFileSync(combine(combine(root, folder), file));
-    response.statusCode = 200;
-    response.statusMessage = "OK";
-    response.setHeader("Content-Type", "image/jpeg");
-    response.end(d);
+    let d = fs.readFileSync(combine(combine(root, folder), file))
+    response.statusCode = 200
+    response.statusMessage = "OK"
+    response.setHeader("Content-Type", "image/jpeg")
+    response.end(d)
 }
 
 fun handleRequest(request, response) {
     if request.method != "GET" {
-        return errorResponse(response, 405, "Method not supported");
-    };
+        return errorResponse(response, 405, "Method not supported")
+    }
 
-    let root = get(process.argv, 2);
+    let root = get(process.argv, 2)
 
-    let parsed = url.parse(request.url, True);
-    let pathName = parsed.pathname;
+    let parsed = url.parse(request.url, True)
+    let pathName = parsed.pathname
 
     if pathName == "/folders" {
-        handleFoldersRequest(response, root);
+        handleFoldersRequest(response, root)
     } else if pathName == "/contents" {
-        let folder = parsed.query.folder;
-        handleContentsRequest(response, root, folder);
+        let folder = parsed.query.folder
+        handleContentsRequest(response, root, folder)
     } else if pathName == "/photo" {
-        let folder = parsed.query.folder;
-        let file = parsed.query.file;
-        handlePhotoRequest(response, root, folder, file);
+        let folder = parsed.query.folder
+        let file = parsed.query.file
+        handlePhotoRequest(response, root, folder, file)
     } else if pathName == "/" {
-        return successResponse(response, "<html><body>data!</body></html>");
+        return successResponse(response, "<html><body>data!</body></html>")
     } else if pathName == "/asset" {
     } else {
-        return errorResponse(response, 404, "Not found");
-    };
+        return errorResponse(response, 404, "Not found")
+    }
 }
 
 fun main() {
-    let server = http.createServer(handleRequest);
+    let server = http.createServer(handleRequest)
 
     server.listen(port, fun() {
-        console.log("Server listening on: http://localhost:%s", port);
-    });
+        console.log("Server listening on: http://localhost:%s", port)
+    })
 }
 
 let _ = main()

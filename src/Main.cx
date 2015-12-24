@@ -2,7 +2,7 @@ declare require: (String) -> a
 
 declare process: {
     argv: Array String,
-}   
+}
 
 let http = require("http")
 let console = require("console")
@@ -11,7 +11,7 @@ let url = require("url")
 
 let port = 9999
 
-fun errorResponse(response, statusCode: Number, statusMessage: String): Unit {
+fun errorResponse(response, statusCode: Number, statusMessage: String): () {
     response.statusCode = statusCode
     response.statusMessage = statusMessage
     response.end(toString(statusCode) + " - " + statusMessage)
@@ -138,9 +138,15 @@ fun handleContentsRequest(response, root: String, folder: String) {
     // TODO: verify folder is in allFolders
 
     let contents = getFolderContents(combine(root, folder))
-    let c = encodeArray(map(encodeString, contents))
+    // TODO: fix this indentation
+    let c = encodeArray(map(fun(e) {
+        encodeObject([
+            ObjectMember("folder", encodeString(folder)),
+            ObjectMember("name", encodeString(e)),
+        ])
+     }, contents))
     let responseJSON = encodeObject(
-        [ObjectMember("contents", c)]
+        [ObjectMember("pictures", c)]
     )
 
     response.statusCode = 200
@@ -162,7 +168,46 @@ fun handlePhotoRequest(response, root, folder, file) {
     response.end(d)
 }
 
-fun handleRequest(request, response) {
+fun catch_(f: () -> a): Option a {
+    let catcher: (() -> a) -> Array a = _unsafe_js("function(f){ try { return [f()]; } catch (e) { return []; } }")
+    let result = catcher(f)
+    if result->length() == 0 {
+      None
+    } else {
+      Some(get(result, 0))
+    }
+}
+
+fun handleAssetRequest(response, asset) {
+    // TODO: verify no .. in string
+    let fullPath = combine("frontend", asset)
+    let stat = match catch_(fun() { fs.lstatSync(fullPath) }) {
+        Some(s) => s;
+        None => return errorResponse(response, 404, "Not found");
+    }
+    if stat.isFile() {
+       let contents = fs.readFileSync(fullPath)
+       // TODO: this syntax is lame - fix the rules
+       let mediaType = if asset->endsWith(".html") {
+           "text/html"
+         } else if asset->endsWith(".css") {
+           "text/css"
+         } else if asset->endsWith(".js") {
+           "text/javascript"
+         } else {
+           return errorResponse(response, 404, "Not found")
+         }
+
+       response.statusCode = 200
+       response.statusMessage = "OK"
+       response.setHeader("Content-Type", mediaType)
+       response.end(contents)
+    } else {
+        errorResponse(response, 404, "Not found")
+    }
+}
+
+fun handleRequest(request, response): () {
     if request.method != "GET" {
         return errorResponse(response, 405, "Method not supported")
     }
@@ -179,13 +224,12 @@ fun handleRequest(request, response) {
         handleContentsRequest(response, root, folder)
     } else if pathName == "/photo" {
         let folder = parsed.query.folder
-        let file = parsed.query.file
+        let file = parsed.query.photo
         handlePhotoRequest(response, root, folder, file)
     } else if pathName == "/" {
-        return successResponse(response, "<html><body>data!</body></html>")
-    } else if pathName == "/asset" {
+        return handleAssetRequest(response, "index.html")
     } else {
-        return errorResponse(response, 404, "Not found")
+        return handleAssetRequest(response, pathName->sliceStringFrom(1))
     }
 }
 

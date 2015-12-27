@@ -138,13 +138,12 @@ fun handleContentsRequest(response, root: String, folder: String) {
     // TODO: verify folder is in allFolders
 
     let contents = getFolderContents(combine(root, folder))
-    // TODO: fix this indentation
     let c = encodeArray(map(fun(e) {
         encodeObject([
             ObjectMember("folder", encodeString(folder)),
             ObjectMember("name", encodeString(e)),
         ])
-     }, contents))
+    }, contents))
     let responseJSON = encodeObject(
         [ObjectMember("pictures", c)]
     )
@@ -186,22 +185,21 @@ fun handleAssetRequest(response, asset) {
         None => return errorResponse(response, 404, "Not found");
     }
     if stat.isFile() {
-       let contents = fs.readFileSync(fullPath)
-       // TODO: this syntax is lame - fix the rules
-       let mediaType = if asset->endsWith(".html") {
-           "text/html"
-         } else if asset->endsWith(".css") {
-           "text/css"
-         } else if asset->endsWith(".js") {
-           "text/javascript"
-         } else {
-           return errorResponse(response, 404, "Not found")
-         }
+        let contents = fs.readFileSync(fullPath)
+        let mediaType = if asset->endsWith(".html") {
+            "text/html"
+        } else if asset->endsWith(".css") {
+            "text/css"
+        } else if asset->endsWith(".js") {
+            "text/javascript"
+        } else {
+            return errorResponse(response, 404, "Not found")
+        }
 
-       response.statusCode = 200
-       response.statusMessage = "OK"
-       response.setHeader("Content-Type", mediaType)
-       response.end(contents)
+        response.statusCode = 200
+        response.statusMessage = "OK"
+        response.setHeader("Content-Type", mediaType)
+        response.end(contents)
     } else {
         errorResponse(response, 404, "Not found")
     }

@@ -1,3 +1,7 @@
+import {
+    Json(...)
+}
+
 declare require: (String) -> a
 
 declare process: {

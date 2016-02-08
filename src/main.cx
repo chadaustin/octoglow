@@ -6,6 +6,7 @@ declare require: (String) -> a
 
 declare process: {
     argv: Array String,
+    exit: (Number) -> (),
 }
 
 let http = require("http")
@@ -126,7 +127,7 @@ fun handlePhotoRequest(response, root, folder, file) {
 fun catch_(f: () -> a): Option a {
     let catcher: (() -> a) -> Array a = _unsafe_js("function(f){ try { return [f()]; } catch (e) { return []; } }")
     let result = catcher(f)
-    if result->length() == 0 {
+    if result->len() == 0 {
       None
     } else {
       Some(get(result, 0))
@@ -188,6 +189,11 @@ fun handleRequest(request, response): () {
 }
 
 fun main() {
+    if len(process.argv) < 3 {
+        print("pass a root photo path")
+        process.exit(1)
+    }
+
     let server = http.createServer(handleRequest)
 
     server.listen(port, fun() {

@@ -4,7 +4,8 @@
   "description": "Browser-Based Slideshow",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "mkdir -p build; ../crux/dist/build/crux/crux src/main.cx > build/main.js",
+    "start": "node build/main.js"
   },
   "repository": {
     "type": "git",

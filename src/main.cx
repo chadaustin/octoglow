@@ -1,5 +1,5 @@
 import {
-    Json(...)
+    json
 }
 
 declare require: (String) -> a
@@ -26,54 +26,6 @@ fun successResponse(response, content: String) {
     response.statusMessage = "OK"
     response.end(content)
 }
-
-/* JSON: */
-
-// Opaque for now.  Eventually we'll make this a proper sum.
-data JSONValue {}
-
-// Crux needs tuples.
-data ObjectMember {
-    ObjectMember(String, JSONValue)
-}
-
-let setProperty = _unsafe_js("function(o, k, v) { o[k] = v; }")
-
-fun encodeObject(members: Array ObjectMember): JSONValue {
-    let v = _unsafe_js("{}")
-
-    // TODO: need irrefutable pattern matches in iteration
-    for member in members {
-        match member {
-            ObjectMember(key, value) => setProperty(v, key, value);
-        }
-    }
-
-    return _unsafe_coerce(v)
-}
-
-fun encodeArray(v: Array JSONValue): JSONValue {
-    // we know that the crux representation of arrays lines up with javascript
-    return _unsafe_coerce(v)
-}
-
-fun encodeString(v: String): JSONValue {
-    return _unsafe_coerce(v)
-}
-
-fun encodeNumber(v: Number): JSONValue {
-    return _unsafe_coerce(v)
-}
-
-fun encodeBoolean(v: Boolean): JSONValue {
-    return _unsafe_coerce(v)
-}
-
-let nullJSValue: JSONValue = _unsafe_js("null")
-
-let renderJSON: (JSONValue) -> String = _unsafe_js("JSON.stringify")
-
-/* END JSON */
 
 /* BEGIN DIRECTORY LIST */
 
@@ -126,15 +78,15 @@ fun getFolderContents(folder) {
 fun handleFoldersRequest(response, root: String) {
     let allFolders = listDirectories(root)
 
-    let folders = encodeArray(map(encodeString, allFolders))
-    let responseJSON = encodeObject(
-        [ObjectMember("folders", folders)]
+    let folders = json.encodeArray(map(json.encodeString, allFolders))
+    let responseJSON = json.encodeObject(
+        [json.ObjectMember("folders", folders)]
     )
 
     response.statusCode = 200
     response.statusMessage = "OK"
     response.setHeader("Content-Type", "application/json")
-    response.end(renderJSON(responseJSON))
+    response.end(json.renderJSON(responseJSON))
 }
 
 fun handleContentsRequest(response, root: String, folder: String) {
@@ -142,20 +94,20 @@ fun handleContentsRequest(response, root: String, folder: String) {
     // TODO: verify folder is in allFolders
 
     let contents = getFolderContents(combine(root, folder))
-    let c = encodeArray(map(fun(e) {
-        encodeObject([
-            ObjectMember("folder", encodeString(folder)),
-            ObjectMember("name", encodeString(e)),
+    let c = json.encodeArray(map(fun(e) {
+        json.encodeObject([
+            json.ObjectMember("folder", json.encodeString(folder)),
+            json.ObjectMember("name", json.encodeString(e)),
         ])
     }, contents))
-    let responseJSON = encodeObject(
-        [ObjectMember("pictures", c)]
+    let responseJSON = json.encodeObject(
+        [json.ObjectMember("pictures", c)]
     )
 
     response.statusCode = 200
     response.statusMessage = "OK"
     response.setHeader("Content-Type", "application/json")
-    response.end(renderJSON(responseJSON))
+    response.end(json.renderJSON(responseJSON))
 }
 
 fun handlePhotoRequest(response, root, folder, file) {

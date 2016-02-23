@@ -1,0 +1,10 @@
+project:
+  name: octoglow
+  description: Web-based Slideshow
+  license: MIT
+  author: Chad Austin
+
+targets:
+  octoglow-server:
+    src-dir: src
+    main-module: main

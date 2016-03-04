@@ -1,5 +1,6 @@
 import {
-    json
+    json,
+    mutarray,
 }
 
 declare require: (String) -> a
@@ -38,7 +39,7 @@ fun combine(a: String, b) {
     }
 }
 
-fun listDirectoriesInner(output: Array String, root, prefix) {
+fun listDirectoriesInner(output: mutarray.MutableArray String, root, prefix) {
     output->append(prefix)
 
     let here = combine(root, prefix)
@@ -53,14 +54,14 @@ fun listDirectoriesInner(output: Array String, root, prefix) {
 }
 
 fun listDirectories(root) {
-    let rv = []
+    let rv = mutable []
     listDirectoriesInner(rv, root, ".")
     rv->sort()
-    return rv
+    return rv->freeze()
 }
 
 fun getFolderContents(folder) {
-    let rv = []
+    let rv = mutable []
 
     let contents: Array String = fs.readdirSync(folder)
     for entry in contents {
@@ -71,7 +72,7 @@ fun getFolderContents(folder) {
         }
     }
 
-    return rv
+    return rv->freeze()
 }
 
 /* END DIRECTORY LIST */
@@ -130,7 +131,7 @@ fun catch_(f: () -> a): Option a {
     if result->len() == 0 {
       None
     } else {
-      Some(get(result, 0))
+      Some(result->get(0))
     }
 }
 
@@ -167,7 +168,7 @@ fun handleRequest(request, response): () {
         return errorResponse(response, 405, "Method not supported")
     }
 
-    let root = get(process.argv, 2)
+    let root = process.argv->get(2)
 
     let parsed = url.parse(request.url, True)
     let pathName = parsed.pathname
@@ -184,7 +185,7 @@ fun handleRequest(request, response): () {
     } else if pathName == "/" {
         return handleAssetRequest(response, "index.html")
     } else {
-        return handleAssetRequest(response, pathName->sliceStringFrom(1))
+        return handleAssetRequest(response, pathName->sliceFrom(1))
     }
 }
 

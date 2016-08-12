@@ -1,13 +1,11 @@
-import {
-    json,
-    mutarray,
-}
+import json
+import mutarray
 
-declare require: (String) -> a
+declare require<a>: String => a
 
 declare process: {
-    argv: Array String,
-    exit: (Number) -> (),
+    argv: [String],
+    exit: Number => (),
 }
 
 let http = require("http")
@@ -39,11 +37,11 @@ fun combine(a: String, b) {
     }
 }
 
-fun listDirectoriesInner(output: mutarray.MutableArray String, root, prefix) {
+fun listDirectoriesInner(output: mutable [String], root, prefix) {
     output->append(prefix)
 
     let here = combine(root, prefix)
-    let contents: Array String = fs.readdirSync(here)
+    let contents: [String] = fs.readdirSync(here)
     for entry in contents {
         let absEntry = combine(here, entry)
         let stat = fs.lstatSync(absEntry)
@@ -63,7 +61,7 @@ fun listDirectories(root) {
 fun getFolderContents(folder) {
     let rv = mutable []
 
-    let contents: Array String = fs.readdirSync(folder)
+    let contents: [String] = fs.readdirSync(folder)
     for entry in contents {
         let absEntry = combine(folder, entry)
         let stat = fs.lstatSync(absEntry)
@@ -80,7 +78,7 @@ fun getFolderContents(folder) {
 fun handleFoldersRequest(response, root: String) {
     let allFolders = listDirectories(root)
 
-    let folders = json.encodeArray(map(json.encodeString, allFolders))
+    let folders = json.encodeArray(allFolders->map(json.encodeString))
     let responseJSON = json.encodeObject(
         [json.ObjectMember("folders", folders)]
     )
@@ -96,12 +94,12 @@ fun handleContentsRequest(response, root: String, folder: String) {
     // TODO: verify folder is in allFolders
 
     let contents = getFolderContents(combine(root, folder))
-    let c = json.encodeArray(map(fun(e) {
+    let c = json.encodeArray(contents->map(fun(e) {
         json.encodeObject([
             json.ObjectMember("folder", json.encodeString(folder)),
             json.ObjectMember("name", json.encodeString(e)),
         ])
-    }, contents))
+    }))
     let responseJSON = json.encodeObject(
         [json.ObjectMember("pictures", c)]
     )
@@ -125,10 +123,10 @@ fun handlePhotoRequest(response, root, folder, file) {
     response.end(d)
 }
 
-fun catch_(f: () -> a): Option a {
-    let catcher: (() -> a) -> Array a = _unsafe_js("function(f){ try { return [f()]; } catch (e) { return []; } }")
+fun catch_<a>(f: () => a): ?a {
+    let catcher: (() => a) => [a] = _unsafe_js("function(f){ try { return [f()]; } catch (e) { return []; } }")
     let result = catcher(f)
-    if result->len() == 0 {
+    if len(result) == 0 {
       None
     } else {
       Some(result->get(0))
@@ -139,8 +137,8 @@ fun handleAssetRequest(response, asset) {
     // TODO: verify no .. in string
     let fullPath = combine("frontend", asset)
     let stat = match catch_(fun() { fs.lstatSync(fullPath) }) {
-        Some(s) => s;
-        None => return errorResponse(response, 404, "Not found");
+        Some(s) => s
+        None => return errorResponse(response, 404, "Not found")
     }
     if stat.isFile() {
         let contents = fs.readFileSync(fullPath)
@@ -179,9 +177,9 @@ fun handleRequest(request, response): () {
         let folder = parsed.query.folder
         handleContentsRequest(response, root, folder)
     } else if pathName == "/photo" {
-        let folder = parsed.query.folder
+        let folder2 = parsed.query.folder // TODO: test for this
         let file = parsed.query.photo
-        handlePhotoRequest(response, root, folder, file)
+        handlePhotoRequest(response, root, folder2, file)
     } else if pathName == "/" {
         return handleAssetRequest(response, "index.html")
     } else {

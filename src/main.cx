@@ -75,18 +75,20 @@ fun getFolderContents(folder) {
 
 /* END DIRECTORY LIST */
 
-fun handleFoldersRequest(response, root: String) {
-    let allFolders = listDirectories(root)
-
-    let folders = json.encodeArray(allFolders->map(json.encodeString))
-    let responseJSON = json.encodeObject(
-        [json.ObjectMember("folders", folders)]
-    )
-
+fun respondJSON(response, body) {
+    let bytes = json.encode(body)
     response.statusCode = 200
     response.statusMessage = "OK"
     response.setHeader("Content-Type", "application/json")
-    response.end(json.renderJSON(responseJSON))
+    response.end(bytes)
+}
+
+fun handleFoldersRequest(response, root: String) {
+    let allFolders = listDirectories(root)
+
+    respondJSON(response, {
+        folders: allFolders,
+    })
 }
 
 fun handleContentsRequest(response, root: String, folder: String) {
@@ -94,20 +96,15 @@ fun handleContentsRequest(response, root: String, folder: String) {
     // TODO: verify folder is in allFolders
 
     let contents = getFolderContents(combine(root, folder))
-    let c = json.encodeArray(contents->map(fun(e) {
-        json.encodeObject([
-            json.ObjectMember("folder", json.encodeString(folder)),
-            json.ObjectMember("name", json.encodeString(e)),
-        ])
-    }))
-    let responseJSON = json.encodeObject(
-        [json.ObjectMember("pictures", c)]
-    )
-
-    response.statusCode = 200
-    response.statusMessage = "OK"
-    response.setHeader("Content-Type", "application/json")
-    response.end(json.renderJSON(responseJSON))
+    let entries = contents->map(e => {
+        return {
+            folder: folder,
+            name: e,
+        }
+    })
+    respondJSON(response, {
+        pictures: entries
+    })
 }
 
 fun handlePhotoRequest(response, root, folder, file) {

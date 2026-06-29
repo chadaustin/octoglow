@@ -1,0 +1,163 @@
+:root {
+  color: #101418;
+  background: #f2f2f2;
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 13px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 520px;
+  min-height: 360px;
+  background: #f2f2f2;
+}
+
+button {
+  min-width: 84px;
+  height: 28px;
+  border: 1px solid #8a8f94;
+  border-radius: 2px;
+  background: linear-gradient(#ffffff, #e6e6e6);
+  color: #101418;
+  font: inherit;
+}
+
+button:hover {
+  border-color: #4f7fb8;
+  background: linear-gradient(#f7fbff, #ddecfb);
+}
+
+button.primary {
+  border-color: #1b5e9c;
+  background: linear-gradient(#ecf6ff, #c9e4fb);
+}
+
+.dialog {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) 240px;
+  grid-template-rows: 1fr auto;
+  gap: 10px;
+  height: 100vh;
+  padding: 12px;
+}
+
+.tree-pane,
+.selection-pane {
+  border: 1px solid #b8bec4;
+  background: #ffffff;
+}
+
+.tree-pane {
+  overflow: auto;
+  padding: 6px;
+}
+
+.selection-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.selection-pane h2 {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid #d4d8dc;
+  background: #f7f7f7;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tree-group {
+  margin: 0;
+  padding: 0 0 0 18px;
+}
+
+.tree > .tree-group {
+  padding-left: 0;
+}
+
+.tree-row {
+  display: grid;
+  grid-template-columns: 18px 18px minmax(0, 1fr);
+  align-items: center;
+  min-height: 24px;
+  color: #101418;
+  white-space: nowrap;
+}
+
+.tree-row:hover {
+  background: #e8f2ff;
+}
+
+.twisty {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  background: transparent;
+  min-width: 18px;
+  padding: 0;
+}
+
+.twisty::before {
+  content: "▸";
+  display: block;
+  color: #40464d;
+  font-size: 12px;
+}
+
+.twisty.expanded::before {
+  content: "▾";
+}
+
+.twisty.empty::before {
+  content: "";
+}
+
+.tree-row input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.label {
+  overflow: hidden;
+  padding: 3px 4px;
+  text-overflow: ellipsis;
+}
+
+.selection {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 6px;
+  overflow: auto;
+  list-style: none;
+}
+
+.selection li {
+  overflow: hidden;
+  padding: 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.status {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: #4b535c;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

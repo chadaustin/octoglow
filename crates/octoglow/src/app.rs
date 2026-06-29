@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::Deserialize;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, COLORREF, GENERIC_ACCESS_RIGHTS, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
@@ -21,31 +22,32 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileAttributesW,
-    ReadFile, WriteFile, CREATE_ALWAYS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    WIN32_FIND_DATAW,
+    ReadFile, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Shell::{
-    FileOpenDialog, IFileOpenDialog, IShellItem, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM,
-    FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
-};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
     GetSystemMetrics, LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassW, SetTimer,
     ShowCursor, ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    IDC_ARROW, MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, WINDOW_EX_STYLE,
-    WM_CREATE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW, WS_POPUP,
+    IDC_ARROW, MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
+    WINDOW_EX_STYLE, WM_CREATE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT,
+    WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
 const WINDOW_CLASS: PCWSTR = w!("OctoglowScreenSaver");
 const TIMER_ID: usize = 1;
 const TIMER_MS: u32 = 33;
+
+#[derive(Deserialize, Default)]
+struct Settings {
+    folders: Vec<String>,
+}
 
 pub fn run() -> windows::core::Result<()> {
     let mode = ScreenSaverMode::from_args(std::env::args().skip(1).collect());
@@ -56,7 +58,7 @@ pub fn run() -> windows::core::Result<()> {
     let result = match mode {
         ScreenSaverMode::ScreenSaver => unsafe { run_screensaver(None) },
         ScreenSaverMode::Preview(parent) => unsafe { run_screensaver(Some(parent)) },
-        ScreenSaverMode::Configure => show_config_dialog(),
+        ScreenSaverMode::Configure => launch_config_dialog(),
         ScreenSaverMode::Password => Ok(()),
     };
 
@@ -109,6 +111,7 @@ impl ScreenSaverMode {
 struct AppState {
     started: Instant,
     last_mouse: Option<(i32, i32)>,
+    image_roots: Vec<PathBuf>,
     images: Vec<PathBuf>,
     featured: Option<PathBuf>,
 }
@@ -132,6 +135,7 @@ unsafe fn run_screensaver(preview_parent: Option<HWND>) -> windows::core::Result
     let state = Box::new(AppState {
         started: Instant::now(),
         last_mouse: None,
+        image_roots,
         images,
         featured,
     });
@@ -262,73 +266,49 @@ unsafe fn paint(hwnd: HWND) {
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF((glow as u32) << 8 | 0x40));
 
-        let status = if let Some(path) = &state.featured {
-            format!(
-                "Octoglow found {} image(s). Next: {}",
-                state.images.len(),
-                path.display()
-            )
-        } else {
-            "Octoglow: configure folders to begin".to_string()
-        };
-        let text = wide(&status);
-        let _ = TextOutW(hdc, 48, 48, &text[..text.len() - 1]);
+        let lines = status_lines(state);
+        for (index, line) in lines.iter().enumerate() {
+            let text = wide(line);
+            let _ = TextOutW(hdc, 48, 48 + (index as i32 * 24), &text[..text.len() - 1]);
+        }
     }
 
     let _ = EndPaint(hwnd, &ps);
 }
 
-fn show_config_dialog() -> windows::core::Result<()> {
-    let selected = unsafe { pick_folders()? };
-    if selected.is_empty() {
-        unsafe {
-            MessageBoxW(
-                None,
-                w!("No folders selected. Existing Octoglow configuration was left unchanged."),
-                w!("Octoglow"),
-                MB_OK | MB_ICONINFORMATION,
-            );
-        }
+fn launch_config_dialog() -> windows::core::Result<()> {
+    let config_exe = std::env::current_exe().ok().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join("octoglow-config-ui.exe"))
+    });
+
+    let Some(config_exe) = config_exe else {
+        show_message("Unable to locate the Octoglow configuration executable.");
+        return Ok(());
+    };
+
+    if !config_exe.exists() {
+        show_message("octoglow-config-ui.exe was not found next to the screensaver.");
         return Ok(());
     }
 
-    save_config(&selected)?;
-    let message = format!("Saved {} folder(s) for Octoglow.", selected.len());
-    let message = wide(&message);
-    unsafe {
-        MessageBoxW(
+    let config_exe = wide_path(&config_exe);
+    let result = unsafe {
+        ShellExecuteW(
             None,
-            PCWSTR(message.as_ptr()),
-            w!("Octoglow"),
-            MB_OK | MB_ICONINFORMATION,
-        );
+            w!("open"),
+            PCWSTR(config_exe.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    if (result.0 as isize) <= 32 {
+        show_message("Octoglow could not open the configuration dialog.");
     }
+
     Ok(())
-}
-
-unsafe fn pick_folders() -> windows::core::Result<Vec<PathBuf>> {
-    let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-    dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_ALLOWMULTISELECT)?;
-    dialog.SetTitle(w!("Choose Octoglow image folders"))?;
-
-    if dialog.Show(None).is_err() {
-        return Ok(Vec::new());
-    }
-
-    let items = dialog.GetResults()?;
-    let count = items.GetCount()?;
-    let mut paths = Vec::with_capacity(count as usize);
-
-    for index in 0..count {
-        let item: IShellItem = items.GetItemAt(index)?;
-        let raw = item.GetDisplayName(SIGDN_FILESYSPATH)?;
-        if !raw.is_null() {
-            paths.push(PathBuf::from(raw.to_string()?));
-            CoTaskMemFree(Some(raw.0.cast()));
-        }
-    }
-
-    Ok(paths)
 }
 
 fn collect_images(roots: &[PathBuf]) -> Vec<PathBuf> {
@@ -390,6 +370,35 @@ fn has_supported_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn status_lines(state: &AppState) -> Vec<String> {
+    if let Some(path) = &state.featured {
+        return vec![
+            format!("Octoglow found {} image(s).", state.images.len()),
+            format!("Next: {}", path.display()),
+        ];
+    }
+
+    if state.image_roots.is_empty() {
+        return vec!["Octoglow: configure folders to begin".to_string()];
+    }
+
+    let mut lines = vec![format!(
+        "Octoglow loaded {} folder(s), but found no decodable images.",
+        state.image_roots.len()
+    )];
+    lines.extend(
+        state
+            .image_roots
+            .iter()
+            .take(4)
+            .map(|path| path.display().to_string()),
+    );
+    if state.image_roots.len() > 4 {
+        lines.push(format!("...and {} more", state.image_roots.len() - 4));
+    }
+    lines
+}
+
 fn can_decode_with_wic(path: &Path) -> windows::core::Result<bool> {
     let factory: IWICImagingFactory =
         unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)? };
@@ -415,16 +424,33 @@ fn config_file() -> windows::core::Result<PathBuf> {
         .unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join("Octoglow");
     ensure_directory(&dir)?;
+    Ok(dir.join("settings.toml"))
+}
+
+fn legacy_config_file() -> windows::core::Result<PathBuf> {
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dir = base.join("Octoglow");
+    ensure_directory(&dir)?;
     Ok(dir.join("folders.txt"))
 }
 
 fn load_config() -> windows::core::Result<Vec<PathBuf>> {
     let file = config_file()?;
-    if !file.exists() {
+    if file.exists() {
+        let bytes = read_file(&file)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let settings = toml::from_str::<Settings>(&text).unwrap_or_default();
+        return Ok(settings.folders.into_iter().map(PathBuf::from).collect());
+    }
+
+    let legacy_file = legacy_config_file()?;
+    if !legacy_file.exists() {
         return Ok(Vec::new());
     }
 
-    let bytes = read_file(&file)?;
+    let bytes = read_file(&legacy_file)?;
     let text = String::from_utf8_lossy(&bytes);
     Ok(text
         .lines()
@@ -432,15 +458,6 @@ fn load_config() -> windows::core::Result<Vec<PathBuf>> {
         .filter(|line| !line.is_empty())
         .map(PathBuf::from)
         .collect())
-}
-
-fn save_config(paths: &[PathBuf]) -> windows::core::Result<()> {
-    let contents = paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join("\r\n");
-    write_file(&config_file()?, contents.as_bytes())
 }
 
 fn ensure_directory(path: &Path) -> windows::core::Result<()> {
@@ -482,25 +499,6 @@ fn read_file(path: &Path) -> windows::core::Result<Vec<u8>> {
         CloseHandle(handle)?;
         Ok(data)
     }
-}
-
-fn write_file(path: &Path, data: &[u8]) -> windows::core::Result<()> {
-    let path_w = wide_path(path);
-    unsafe {
-        let handle = CreateFileW(
-            PCWSTR(path_w.as_ptr()),
-            FILE_GENERIC_WRITE.0,
-            FILE_SHARE_READ,
-            None,
-            CREATE_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )?;
-        let mut written = 0u32;
-        WriteFile(handle, Some(data), Some(&mut written), None)?;
-        CloseHandle(handle)?;
-    }
-    Ok(())
 }
 
 fn filename_from_find_data(data: &WIN32_FIND_DATAW) -> Option<String> {
@@ -545,4 +543,16 @@ fn wide_path(path: &Path) -> Vec<u16> {
 
 fn null_hwnd() -> HWND {
     HWND(null_mut())
+}
+
+fn show_message(message: &str) {
+    let message = wide(message);
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(message.as_ptr()),
+            w!("Octoglow"),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
 }

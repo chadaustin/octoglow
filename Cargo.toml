@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "crates/octoglow",
+    "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = ""
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

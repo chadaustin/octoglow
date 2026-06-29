@@ -5,10 +5,11 @@ Octoglow is a native Win32 screensaver written in Rust. The goal is to let the u
 This repository currently contains the first skeleton:
 
 - a Rust workspace with the `octoglow` screensaver binary;
-- an `xtask` build command that emits `target/release/octoglow.scr`;
+- a Tauri-based `octoglow-config-ui` companion binary for the configuration dialog;
+- an `xtask` build command that emits `target/release/octoglow.scr` and `target/release/octoglow-config-ui.exe`;
 - Win32 screensaver mode routing for `/s`, `/c`, `/p`, and `/a`;
-- a native configuration flow using `IFileOpenDialog` in folder-picking mode;
-- configuration persisted under `%APPDATA%\Octoglow\folders.txt`;
+- a Win32-like configuration dialog with a checkbox tree view for selecting folders;
+- configuration persisted as TOML under `%APPDATA%\Octoglow\settings.toml`;
 - recursive folder scanning through Win32 file APIs (`FindFirstFileW`, `FindNextFileW`);
 - config file I/O through Win32 file APIs (`CreateFileW`, `ReadFile`, `WriteFile`);
 - WIC probing for PNG, JPEG, and HEIC/HEIF containers.
@@ -31,6 +32,7 @@ The output is:
 
 ```text
 target\release\octoglow.scr
+target\release\octoglow-config-ui.exe
 ```
 
 During development, a normal executable build also works:
@@ -52,19 +54,37 @@ target\release\octoglow.scr /p <parent-hwnd>
 Current behavior:
 
 - `/s` opens a borderless fullscreen Win32 window, scans configured folders, and paints a placeholder animated status line.
-- `/c` opens the native folder picker and saves the selected folders.
+- `/c` launches `octoglow-config-ui.exe`, which should be next to the `.scr` file.
 - `/p` creates a small preview window skeleton.
 - `/a` is accepted as the password-change mode and currently exits.
 
 ## Configuration
 
-The configuration UI currently uses the native Windows folder picker with multi-select enabled. It saves one folder path per line to:
+The configuration UI is a Tauri companion app that presents a Win32-like dialog with a filesystem tree and checkboxes. It saves the selected folders to:
 
 ```text
-%APPDATA%\Octoglow\folders.txt
+%APPDATA%\Octoglow\settings.toml
 ```
 
-The next session should replace or extend this with the intended custom tree view UI so users can browse the filesystem and toggle folders directly inside Octoglow.
+The current format is:
+
+```toml
+folders = [
+  "D:\\Pictures",
+  "E:\\Wallpapers",
+]
+```
+
+The tree contents are supplied by Rust commands that enumerate drives and directories with Win32 file APIs. The UI currently hides hidden and system directories, loads child folders on demand, and stores selected folders when Save is clicked.
+
+For compatibility during early development, Octoglow can still read the previous `%APPDATA%\Octoglow\folders.txt` line-based format if `settings.toml` does not exist. Saving always writes `settings.toml`.
+
+When installing or manually testing the screensaver configuration endpoint, keep these files together:
+
+```text
+octoglow.scr
+octoglow-config-ui.exe
+```
 
 ## Image Support
 
@@ -97,6 +117,18 @@ Good follow-up work:
 ├── Cargo.toml
 ├── README.md
 ├── crates
+│   ├── octoglow-config-ui
+│   │   ├── Cargo.toml
+│   │   ├── build.rs
+│   │   ├── tauri.conf.json
+│   │   ├── icons
+│   │   │   └── icon.ico
+│   │   ├── src
+│   │   │   └── main.rs
+│   │   └── ui
+│   │       ├── index.html
+│   │       ├── main.js
+│   │       └── styles.css
 │   └── octoglow
 │       ├── Cargo.toml
 │       ├── build.rs

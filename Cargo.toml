@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/octoglow",
+    "crates/octoglow-config-ui",
     "xtask",
 ]
 resolver = "2"

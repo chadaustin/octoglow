@@ -1,11 +1,26 @@
 fn main() {
-    #[cfg(windows)]
-    {
-        let mut resource = winresource::WindowsResource::new();
-        resource.set("FileDescription", "Octoglow Screensaver");
-        resource.set("ProductName", "Octoglow");
-        resource.set("OriginalFilename", "octoglow.scr");
-        resource.set("InternalName", "octoglow");
-        resource.compile().expect("compile Windows resources");
-    }
+    ensure_placeholder_icon();
+    tauri_build::build();
 }
+
+fn ensure_placeholder_icon() {
+    let icon = std::path::Path::new("icons").join("icon.ico");
+    if icon.exists()
+        && std::fs::read(&icon)
+            .map(|current| current == PLACEHOLDER_ICON)
+            .unwrap_or(false)
+    {
+        return;
+    }
+
+    std::fs::create_dir_all("icons").expect("create Tauri icon directory");
+    std::fs::write(icon, PLACEHOLDER_ICON).expect("write placeholder Tauri icon");
+}
+
+const PLACEHOLDER_ICON: &[u8] = &[
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x20, 0x00, 0x30, 0x00,
+    0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0xa0,
+    0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+];

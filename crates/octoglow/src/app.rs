@@ -2,21 +2,24 @@
 
 use std::ffi::OsStr;
 use std::iter::once;
+use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use scrnsave::{RunMode, ScreenSaver, ScreenSaverConfig};
 use serde::Deserialize;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, COLORREF, GENERIC_ACCESS_RIGHTS, HWND, RECT};
+use windows::Win32::Foundation::{CloseHandle, COLORREF, GENERIC_READ, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, SetBkMode, SetTextColor,
-    TextOutW, HBRUSH, PAINTSTRUCT, TRANSPARENT,
+    StretchDIBits, TextOutW, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBRUSH,
+    PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatHeif, GUID_ContainerFormatJpeg,
-    GUID_ContainerFormatPng, IWICImagingFactory, WICDecodeMetadataCacheOnDemand,
+    GUID_ContainerFormatPng, GUID_WICPixelFormat32bppBGRA, IWICImagingFactory,
+    WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileAttributesW,
@@ -27,10 +30,11 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_APARTMENTTHREADED,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, MessageBoxW, MB_ICONINFORMATION, MB_OK, SW_SHOWNORMAL,
+    GetClientRect, MessageBoxW, MB_ICONINFORMATION, MB_OK,
 };
+
+const MAX_RENDER_PIXELS: u32 = 1280 * 720;
 
 #[derive(Deserialize, Default)]
 struct Settings {
@@ -55,8 +59,16 @@ struct OctoglowScreensaver;
 struct AppState {
     started: Instant,
     image_roots: Vec<PathBuf>,
-    images: Vec<PathBuf>,
-    featured: Option<PathBuf>,
+    candidate_count: usize,
+    decode_failure_count: usize,
+    images: Vec<DecodedImage>,
+}
+
+struct DecodedImage {
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
 }
 
 impl ScreenSaver for OctoglowScreensaver {
@@ -68,13 +80,13 @@ impl ScreenSaver for OctoglowScreensaver {
 
     fn initialize(&mut self, _mode: RunMode) -> windows::core::Result<Self::State> {
         let image_roots = load_config().unwrap_or_default();
-        let images = collect_images(&image_roots);
-        let featured = pick_random(&images).cloned();
+        let scan = collect_images(&image_roots);
         Ok(AppState {
             started: Instant::now(),
             image_roots,
-            images,
-            featured,
+            candidate_count: scan.candidate_count,
+            decode_failure_count: scan.decode_failure_count,
+            images: scan.images,
         })
     }
 
@@ -97,16 +109,31 @@ unsafe fn paint(hwnd: HWND, state: &mut AppState) {
     let mut rect = RECT::default();
     let _ = GetClientRect(hwnd, &mut rect);
 
-    let brush: HBRUSH = CreateSolidBrush(COLORREF(0x00101410));
-    FillRect(hdc, &rect, brush);
-    let _ = DeleteObject(brush.into());
-
     let elapsed = state.started.elapsed().as_secs_f32();
     let glow = ((elapsed.sin() + 1.0) * 70.0 + 90.0) as u8;
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, COLORREF((glow as u32) << 8 | 0x40));
 
     let lines = status_lines(state);
+
+    if state.images.is_empty() {
+        let brush: HBRUSH = CreateSolidBrush(COLORREF(0x00101410));
+        FillRect(hdc, &rect, brush);
+        let _ = DeleteObject(brush.into());
+    } else {
+        let width = (rect.right - rect.left).max(1) as u32;
+        let height = (rect.bottom - rect.top).max(1) as u32;
+        let (render_width, render_height) = render_size(width, height);
+        let frame = render_frame(state, render_width, render_height);
+        blit_frame(hdc, width, height, render_width, render_height, &frame);
+    }
+
+    let text_color = if state.images.is_empty() {
+        COLORREF((glow as u32) << 8 | 0x40)
+    } else {
+        COLORREF(0x00f0f0f0)
+    };
+    SetTextColor(hdc, text_color);
+
     for (index, line) in lines.iter().enumerate() {
         let text = wide(line);
         let _ = TextOutW(hdc, 48, 48 + (index as i32 * 24), &text[..text.len() - 1]);
@@ -116,53 +143,47 @@ unsafe fn paint(hwnd: HWND, state: &mut AppState) {
 }
 
 fn launch_config_dialog(parent: Option<HWND>) -> windows::core::Result<()> {
-    let config_exe = std::env::current_exe().ok().and_then(|path| {
-        path.parent()
-            .map(|parent| parent.join("octoglow-config-ui.exe"))
-    });
-
-    let Some(config_exe) = config_exe else {
-        show_message("Unable to locate the Octoglow configuration executable.");
-        return Ok(());
-    };
-
-    if !config_exe.exists() {
-        show_message("octoglow-config-ui.exe was not found next to the screensaver.");
-        return Ok(());
-    }
-
-    let config_exe = wide_path(&config_exe);
-    let result = unsafe {
-        ShellExecuteW(
-            parent,
-            w!("open"),
-            PCWSTR(config_exe.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-
-    if (result.0 as isize) <= 32 {
+    if let Err(error) = crate::config_ui::run(parent) {
         show_message("Octoglow could not open the configuration dialog.");
+        return Err(error);
     }
 
     Ok(())
 }
 
-fn collect_images(roots: &[PathBuf]) -> Vec<PathBuf> {
-    let mut images = Vec::new();
-    for root in roots {
-        collect_images_from(root, &mut images);
-    }
-
-    images
-        .into_iter()
-        .filter(|path| can_decode_with_wic(path).unwrap_or(false))
-        .collect()
+struct ImageScan {
+    candidate_count: usize,
+    decode_failure_count: usize,
+    images: Vec<DecodedImage>,
 }
 
-fn collect_images_from(root: &Path, images: &mut Vec<PathBuf>) {
+fn collect_images(roots: &[PathBuf]) -> ImageScan {
+    let mut candidates = Vec::new();
+    for root in roots {
+        collect_image_candidates(root, &mut candidates);
+    }
+
+    let candidate_count = candidates.len();
+    let mut decode_failure_count = 0;
+    let images = candidates
+        .into_iter()
+        .filter_map(|path| match decode_image_with_wic(&path) {
+            Ok(image) => Some(image),
+            Err(_) => {
+                decode_failure_count += 1;
+                None
+            }
+        })
+        .collect();
+
+    ImageScan {
+        candidate_count,
+        decode_failure_count,
+        images,
+    }
+}
+
+fn collect_image_candidates(root: &Path, images: &mut Vec<PathBuf>) {
     let pattern = root.join("*");
     let mut find_data = WIN32_FIND_DATAW::default();
     let pattern = wide_path(&pattern);
@@ -181,7 +202,7 @@ fn collect_images_from(root: &Path, images: &mut Vec<PathBuf>) {
                 if name != "." && name != ".." {
                     let child = root.join(&name);
                     if find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
-                        collect_images_from(&child, images);
+                        collect_image_candidates(&child, images);
                     } else if has_supported_extension(&child) {
                         images.push(child);
                     }
@@ -210,10 +231,10 @@ fn has_supported_extension(path: &Path) -> bool {
 }
 
 fn status_lines(state: &AppState) -> Vec<String> {
-    if let Some(path) = &state.featured {
+    if let Some(image) = current_image(state) {
         return vec![
             format!("Octoglow found {} image(s).", state.images.len()),
-            format!("Next: {}", path.display()),
+            format!("Showing: {}", image.path.display()),
         ];
     }
 
@@ -222,9 +243,16 @@ fn status_lines(state: &AppState) -> Vec<String> {
     }
 
     let mut lines = vec![format!(
-        "Octoglow loaded {} folder(s), but found no decodable images.",
-        state.image_roots.len()
+        "Octoglow loaded {} folder(s), found {} supported file candidate(s), decoded 0 image(s).",
+        state.image_roots.len(),
+        state.candidate_count
     )];
+    if state.decode_failure_count > 0 {
+        lines.push(format!(
+            "{} candidate(s) failed WIC decode validation.",
+            state.decode_failure_count
+        ));
+    }
     lines.extend(
         state
             .image_roots
@@ -238,7 +266,7 @@ fn status_lines(state: &AppState) -> Vec<String> {
     lines
 }
 
-fn can_decode_with_wic(path: &Path) -> windows::core::Result<bool> {
+fn decode_image_with_wic(path: &Path) -> windows::core::Result<DecodedImage> {
     let factory: IWICImagingFactory =
         unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)? };
     let path = wide_path(path);
@@ -246,15 +274,192 @@ fn can_decode_with_wic(path: &Path) -> windows::core::Result<bool> {
         factory.CreateDecoderFromFilename(
             PCWSTR(path.as_ptr()),
             None,
-            GENERIC_ACCESS_RIGHTS(FILE_GENERIC_READ.0),
+            GENERIC_READ,
             WICDecodeMetadataCacheOnDemand,
         )?
     };
     let format = unsafe { decoder.GetContainerFormat()? };
 
-    Ok(format == GUID_ContainerFormatPng
+    if !(format == GUID_ContainerFormatPng
         || format == GUID_ContainerFormatJpeg
         || format == GUID_ContainerFormatHeif)
+    {
+        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+            0x80004005u32 as i32,
+        )));
+    }
+
+    let frame = unsafe { decoder.GetFrame(0)? };
+    let source = unsafe { WICConvertBitmapSource(&GUID_WICPixelFormat32bppBGRA, &frame)? };
+    let mut width = 0;
+    let mut height = 0;
+    unsafe {
+        source.GetSize(&mut width, &mut height)?;
+    }
+
+    let stride = width.saturating_mul(4);
+    let mut pixels = vec![0; stride.saturating_mul(height) as usize];
+    unsafe {
+        source.CopyPixels(std::ptr::null(), stride, &mut pixels)?;
+    }
+
+    Ok(DecodedImage {
+        path: PathBuf::from(String::from_utf16_lossy(
+            &path[..path.len().saturating_sub(1)],
+        )),
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn current_image(state: &AppState) -> Option<&DecodedImage> {
+    let (current, _, _) = playback_indices(state, 1.0);
+    state.images.get(current)
+}
+
+fn render_frame(state: &AppState, width: u32, height: u32) -> Vec<u8> {
+    let mut frame = vec![0; width.saturating_mul(height).saturating_mul(4) as usize];
+    if state.images.is_empty() {
+        return frame;
+    }
+
+    let elapsed = state.started.elapsed().as_secs_f32();
+    let (current, next, alpha_next) = playback_indices(state, elapsed);
+    let alpha_current = if elapsed < 2.0 {
+        (elapsed / 2.0).max(0.08)
+    } else {
+        1.0 - alpha_next
+    };
+
+    if let Some(image) = state.images.get(current) {
+        blend_image_into_frame(
+            image,
+            &mut frame,
+            width,
+            height,
+            alpha_current.clamp(0.0, 1.0),
+        );
+    }
+    if alpha_next > 0.0 {
+        if let Some(image) = state.images.get(next) {
+            blend_image_into_frame(image, &mut frame, width, height, alpha_next.clamp(0.0, 1.0));
+        }
+    }
+
+    frame
+}
+
+fn render_size(width: u32, height: u32) -> (u32, u32) {
+    let pixels = width.saturating_mul(height);
+    if pixels <= MAX_RENDER_PIXELS {
+        return (width.max(1), height.max(1));
+    }
+
+    let scale = (MAX_RENDER_PIXELS as f32 / pixels as f32).sqrt();
+    (
+        ((width as f32 * scale).round() as u32).max(1),
+        ((height as f32 * scale).round() as u32).max(1),
+    )
+}
+
+fn playback_indices(state: &AppState, elapsed: f32) -> (usize, usize, f32) {
+    let len = state.images.len();
+    if len <= 1 {
+        return (0, 0, 0.0);
+    }
+
+    let elapsed = (elapsed - 2.0).max(0.0);
+    let hold = 6.0;
+    let fade = 2.0;
+    let period = hold + fade;
+    let cycle = (elapsed / period).floor() as usize;
+    let local = elapsed % period;
+    let current = cycle % len;
+    let next = (current + 1) % len;
+    let alpha_next = if local < hold {
+        0.0
+    } else {
+        (local - hold) / fade
+    };
+
+    (current, next, alpha_next)
+}
+
+fn blend_image_into_frame(
+    image: &DecodedImage,
+    frame: &mut [u8],
+    width: u32,
+    height: u32,
+    alpha: f32,
+) {
+    if alpha <= 0.0 || image.width == 0 || image.height == 0 || width == 0 || height == 0 {
+        return;
+    }
+
+    let scale = (width as f32 / image.width as f32).min(height as f32 / image.height as f32);
+    let draw_width = ((image.width as f32 * scale).round() as u32)
+        .max(1)
+        .min(width);
+    let draw_height = ((image.height as f32 * scale).round() as u32)
+        .max(1)
+        .min(height);
+    let offset_x = (width - draw_width) / 2;
+    let offset_y = (height - draw_height) / 2;
+
+    for y in 0..draw_height {
+        let src_y = ((y as u64 * image.height as u64) / draw_height as u64) as u32;
+        for x in 0..draw_width {
+            let src_x = ((x as u64 * image.width as u64) / draw_width as u64) as u32;
+            let src_idx = ((src_y * image.width + src_x) * 4) as usize;
+            let dst_idx = (((offset_y + y) * width + (offset_x + x)) * 4) as usize;
+
+            for channel in 0..3 {
+                let src = image.pixels[src_idx + channel] as f32;
+                let dst = frame[dst_idx + channel] as f32;
+                frame[dst_idx + channel] = (dst + (src - dst) * alpha).round() as u8;
+            }
+            frame[dst_idx + 3] = 255;
+        }
+    }
+}
+
+unsafe fn blit_frame(
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    dest_width: u32,
+    dest_height: u32,
+    source_width: u32,
+    source_height: u32,
+    frame: &[u8],
+) {
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: source_width as i32,
+            biHeight: -(source_height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let _ = StretchDIBits(
+        hdc,
+        0,
+        0,
+        dest_width as i32,
+        dest_height as i32,
+        0,
+        0,
+        source_width as i32,
+        source_height as i32,
+        Some(frame.as_ptr().cast()),
+        &mut info,
+        DIB_RGB_COLORS,
+        SRCCOPY,
+    );
 }
 
 fn config_file() -> windows::core::Result<PathBuf> {
@@ -351,17 +556,6 @@ fn filename_from_find_data(data: &WIN32_FIND_DATAW) -> Option<String> {
     } else {
         Some(String::from_utf16_lossy(&data.cFileName[..len]))
     }
-}
-
-fn pick_random<T>(items: &[T]) -> Option<&T> {
-    if items.is_empty() {
-        return None;
-    }
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .subsec_nanos() as usize;
-    items.get(nanos % items.len())
 }
 
 fn wide(value: &str) -> Vec<u16> {

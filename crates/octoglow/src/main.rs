@@ -2,6 +2,8 @@
 
 #[cfg(windows)]
 mod app;
+#[cfg(windows)]
+mod config_ui;
 
 #[cfg(windows)]
 fn main() -> windows::core::Result<()> {

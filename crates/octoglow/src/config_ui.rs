@@ -1,4 +1,3 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::iter::once;
@@ -6,8 +5,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::CloseHandle;
+use windows::core::{HRESULT, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileAttributesW,
     GetLogicalDrives, ReadFile, WriteFile, CREATE_ALWAYS, FILE_ATTRIBUTE_DIRECTORY,
@@ -27,7 +26,7 @@ struct Settings {
     folders: Vec<String>,
 }
 
-fn main() {
+pub fn run(_parent: Option<HWND>) -> windows::core::Result<()> {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             list_roots,
@@ -37,7 +36,9 @@ fn main() {
             close_window
         ])
         .run(tauri::generate_context!())
-        .expect("run Octoglow configuration UI");
+        .map_err(|error| {
+            windows::core::Error::new(HRESULT(0x80004005u32 as i32), error.to_string())
+        })
 }
 
 #[tauri::command]

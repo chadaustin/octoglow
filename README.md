@@ -2,12 +2,12 @@
 
 Octoglow is a native Win32 screensaver written in Rust. The goal is to let the user choose folders from the Windows file tree, then show a gently animated random rotation of images from those folders. Video support is planned for later.
 
-This repository currently contains the first skeleton:
+This repository currently contains:
 
 - a Rust workspace with the `octoglow` screensaver binary;
 - a `scrnsave` crate that implements the screensaver command-line protocol, fullscreen/preview window setup, message loop, timer, and input-to-dismiss behavior normally hidden by `Scrnsave.lib`;
-- a Tauri-based `octoglow-config-ui` companion binary for the configuration dialog;
-- an `xtask` build command that emits `target/release/octoglow.scr` and `target/release/octoglow-config-ui.exe`;
+- an embedded Tauri configuration UI initialized only for the `/c` configuration path;
+- an `xtask` build command that emits `target/release/octoglow.scr`;
 - Win32 screensaver mode routing for `/s`, `/c`, `/p`, and `/a`;
 - a Win32-like configuration dialog with a checkbox tree view for selecting folders;
 - configuration persisted as TOML under `%APPDATA%\Octoglow\settings.toml`;
@@ -33,7 +33,6 @@ The output is:
 
 ```text
 target\release\octoglow.scr
-target\release\octoglow-config-ui.exe
 ```
 
 During development, a normal executable build also works:
@@ -58,9 +57,9 @@ target\release\octoglow.scr /a <parent-hwnd>
 Current behavior:
 
 - `/s` opens a borderless fullscreen Win32 window, scans configured folders, and paints a placeholder animated status line.
-- `/c` launches `octoglow-config-ui.exe`, which should be next to the `.scr` file.
-- `/c:<hwnd>` also launches configuration, passing the parent HWND as the ShellExecute owner.
-- `/p` creates a small preview window skeleton.
+- `/c` initializes the embedded Tauri configuration UI.
+- `/c:<hwnd>` also launches configuration, passing the parent HWND through the screensaver framework.
+- `/p` creates a preview window skeleton hosted by the parent HWND when one is provided.
 - `/p:<hwnd>` is accepted in addition to `/p <hwnd>`.
 - `/a` and `/a:<hwnd>` are accepted as password-change modes and currently exit.
 
@@ -68,7 +67,7 @@ The `scrnsave` crate owns these mode semantics and exposes a Rust `ScreenSaver` 
 
 ## Configuration
 
-The configuration UI is a Tauri companion app that presents a Win32-like dialog with a filesystem tree and checkboxes. It saves the selected folders to:
+The configuration UI is embedded in the screensaver binary and presents a Win32-like dialog with a filesystem tree and checkboxes. It saves the selected folders to:
 
 ```text
 %APPDATA%\Octoglow\settings.toml
@@ -87,12 +86,7 @@ The tree contents are supplied by Rust commands that enumerate drives and direct
 
 For compatibility during early development, Octoglow can still read the previous `%APPDATA%\Octoglow\folders.txt` line-based format if `settings.toml` does not exist. Saving always writes `settings.toml`.
 
-When installing or manually testing the screensaver configuration endpoint, keep these files together:
-
-```text
-octoglow.scr
-octoglow-config-ui.exe
-```
+Only `octoglow.scr` is needed for installation or manual testing.
 
 ## Image Support
 
@@ -112,39 +106,35 @@ Good follow-up work:
 
 - Replace placeholder painting with real WIC image decoding and GDI, Direct2D, or DirectComposition rendering.
 - Add gentle pan, scale, fade-in, and fade-out animation.
-- Build the real configuration tree view UI with checkboxes and persisted selection state.
 - Track image metadata and cache scan results to avoid a full recursive scan on every launch.
 - Add video support through Media Foundation.
-- Improve `/p` preview sizing by querying the parent preview rectangle.
 - Add an installer or documented manual install step that copies `octoglow.scr` to the appropriate Windows screensaver location.
 
 ## Project Layout
 
 ```text
 .
-├── Cargo.toml
-├── README.md
-├── crates
-│   ├── octoglow-config-ui
-│   │   ├── Cargo.toml
-│   │   ├── build.rs
-│   │   ├── tauri.conf.json
-│   │   ├── icons
-│   │   │   └── icon.ico
-│   │   ├── src
-│   │   │   └── main.rs
-│   │   └── ui
-│   │       ├── index.html
-│   │       ├── main.js
-│   │       └── styles.css
-│   └── octoglow
-│       ├── Cargo.toml
-│       ├── build.rs
-│       └── src
-│           ├── app.rs
-│           └── main.rs
-└── xtask
-    ├── Cargo.toml
-    └── src
-        └── main.rs
+|-- Cargo.toml
+|-- README.md
+|-- crates
+|   |-- octoglow
+|   |   |-- Cargo.toml
+|   |   |-- build.rs
+|   |   |-- tauri.conf.json
+|   |   |-- src
+|   |   |   |-- app.rs
+|   |   |   |-- config_ui.rs
+|   |   |   `-- main.rs
+|   |   `-- ui
+|   |       |-- index.html
+|   |       |-- main.js
+|   |       `-- styles.css
+|   `-- scrnsave
+|       |-- Cargo.toml
+|       `-- src
+|           `-- lib.rs
+`-- xtask
+    |-- Cargo.toml
+    `-- src
+        `-- main.rs
 ```

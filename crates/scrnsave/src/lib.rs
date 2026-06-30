@@ -10,6 +10,7 @@ use std::os::windows::ffi::OsStrExt;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
@@ -201,6 +202,9 @@ where
         let _ = ShowCursor(false);
     }
     let _ = ShowWindow(hwnd, SW_SHOW);
+    let _ = InvalidateRect(Some(hwnd), None, false);
+    let _ = UpdateWindow(hwnd);
+
     let mut msg = MSG::default();
     while GetMessageW(&mut msg, None, 0, 0).into() {
         let _ = TranslateMessage(&msg);

@@ -104,14 +104,14 @@ button.primary {
 }
 
 .twisty::before {
-  content: "▸";
+  content: ">";
   display: block;
   color: #40464d;
   font-size: 12px;
 }
 
 .twisty.expanded::before {
-  content: "▾";
+  content: "v";
 }
 
 .twisty.empty::before {

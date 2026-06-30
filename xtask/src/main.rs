@@ -27,14 +27,7 @@ fn run() -> Result<(), String> {
 
 fn build_scr() -> Result<(), String> {
     let status = Command::new("cargo")
-        .args([
-            "build",
-            "-p",
-            "octoglow",
-            "-p",
-            "octoglow-config-ui",
-            "--release",
-        ])
+        .args(["build", "-p", "octoglow", "--release"])
         .status()
         .map_err(|error| format!("failed to run cargo build: {error}"))?;
 
@@ -56,12 +49,5 @@ fn build_scr() -> Result<(), String> {
     })?;
 
     println!("Generated {}", scr.display());
-    println!(
-        "Generated {}",
-        target_dir
-            .join("release")
-            .join("octoglow-config-ui.exe")
-            .display()
-    );
     Ok(())
 }

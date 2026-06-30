@@ -4,17 +4,15 @@ use std::ffi::OsStr;
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::ptr::null_mut;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use scrnsave::{RunMode, ScreenSaver, ScreenSaverConfig};
 use serde::Deserialize;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{
-    CloseHandle, COLORREF, GENERIC_ACCESS_RIGHTS, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
-};
+use windows::Win32::Foundation::{CloseHandle, COLORREF, GENERIC_ACCESS_RIGHTS, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, SetBkMode,
-    SetTextColor, TextOutW, HBRUSH, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, SetBkMode, SetTextColor,
+    TextOutW, HBRUSH, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatHeif, GUID_ContainerFormatJpeg,
@@ -29,20 +27,10 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_APARTMENTTHREADED,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetSystemMetrics, LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassW, SetTimer,
-    ShowCursor, ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    IDC_ARROW, MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
-    WINDOW_EX_STYLE, WM_CREATE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT,
-    WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    GetClientRect, MessageBoxW, MB_ICONINFORMATION, MB_OK, SW_SHOWNORMAL,
 };
-
-const WINDOW_CLASS: PCWSTR = w!("OctoglowScreenSaver");
-const TIMER_ID: usize = 1;
-const TIMER_MS: u32 = 33;
 
 #[derive(Deserialize, Default)]
 struct Settings {
@@ -50,17 +38,11 @@ struct Settings {
 }
 
 pub fn run() -> windows::core::Result<()> {
-    let mode = ScreenSaverMode::from_args(std::env::args().skip(1).collect());
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
     }
 
-    let result = match mode {
-        ScreenSaverMode::ScreenSaver => unsafe { run_screensaver(None) },
-        ScreenSaverMode::Preview(parent) => unsafe { run_screensaver(Some(parent)) },
-        ScreenSaverMode::Configure => launch_config_dialog(),
-        ScreenSaverMode::Password => Ok(()),
-    };
+    let result = scrnsave::run(OctoglowScreensaver, std::env::args().skip(1));
 
     unsafe {
         CoUninitialize();
@@ -68,189 +50,48 @@ pub fn run() -> windows::core::Result<()> {
     result
 }
 
-#[derive(Debug)]
-enum ScreenSaverMode {
-    ScreenSaver,
-    Configure,
-    Preview(HWND),
-    Password,
-}
-
-impl ScreenSaverMode {
-    fn from_args(args: Vec<String>) -> Self {
-        if args.is_empty() {
-            return Self::Configure;
-        }
-
-        let first = args[0]
-            .trim()
-            .trim_start_matches(['/', '-'])
-            .to_ascii_lowercase();
-        let mode = first
-            .chars()
-            .next()
-            .map(|c| c.to_ascii_lowercase())
-            .unwrap_or('c');
-
-        match mode {
-            's' => Self::ScreenSaver,
-            'p' => {
-                let hwnd = args
-                    .get(1)
-                    .and_then(|raw| raw.parse::<isize>().ok())
-                    .map(|raw| HWND(raw as *mut _))
-                    .unwrap_or_else(null_hwnd);
-                Self::Preview(hwnd)
-            }
-            'a' => Self::Password,
-            _ => Self::Configure,
-        }
-    }
-}
+struct OctoglowScreensaver;
 
 struct AppState {
     started: Instant,
-    last_mouse: Option<(i32, i32)>,
     image_roots: Vec<PathBuf>,
     images: Vec<PathBuf>,
     featured: Option<PathBuf>,
 }
 
-unsafe fn run_screensaver(preview_parent: Option<HWND>) -> windows::core::Result<()> {
-    let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
-    let cursor = LoadCursorW(None, IDC_ARROW)?;
-    let wc = WNDCLASSW {
-        hCursor: cursor,
-        hInstance: hinstance,
-        lpszClassName: WINDOW_CLASS,
-        style: CS_HREDRAW | CS_VREDRAW,
-        lpfnWndProc: Some(window_proc),
-        ..Default::default()
-    };
-    RegisterClassW(&wc);
+impl ScreenSaver for OctoglowScreensaver {
+    type State = AppState;
 
-    let image_roots = load_config().unwrap_or_default();
-    let images = collect_images(&image_roots);
-    let featured = pick_random(&images).cloned();
-    let state = Box::new(AppState {
-        started: Instant::now(),
-        last_mouse: None,
-        image_roots,
-        images,
-        featured,
-    });
-    let state_ptr = Box::into_raw(state);
-
-    let (style, x, y, width, height, parent) = if let Some(parent) = preview_parent {
-        (WS_OVERLAPPEDWINDOW, 0, 0, 320, 240, parent)
-    } else {
-        (
-            WS_POPUP,
-            0,
-            0,
-            GetSystemMetrics(SM_CXSCREEN),
-            GetSystemMetrics(SM_CYSCREEN),
-            null_hwnd(),
-        )
-    };
-
-    let hwnd = CreateWindowExW(
-        WINDOW_EX_STYLE::default(),
-        WINDOW_CLASS,
-        w!("Octoglow"),
-        style,
-        if parent.0.is_null() { CW_USEDEFAULT } else { x },
-        if parent.0.is_null() { CW_USEDEFAULT } else { y },
-        width,
-        height,
-        (!parent.0.is_null()).then_some(parent),
-        None,
-        Some(hinstance),
-        Some(state_ptr.cast()),
-    )?;
-
-    if preview_parent.is_none() {
-        ShowCursor(false);
-    }
-    let _ = ShowWindow(hwnd, SW_SHOW);
-    SetTimer(Some(hwnd), TIMER_ID, TIMER_MS, None);
-
-    let mut msg = MSG::default();
-    while GetMessageW(&mut msg, None, 0, 0).into() {
-        let _ = TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    fn config(&self) -> ScreenSaverConfig {
+        ScreenSaverConfig::new("OctoglowScreenSaver", "Octoglow")
     }
 
-    if preview_parent.is_none() {
-        ShowCursor(true);
+    fn initialize(&mut self, _mode: RunMode) -> windows::core::Result<Self::State> {
+        let image_roots = load_config().unwrap_or_default();
+        let images = collect_images(&image_roots);
+        let featured = pick_random(&images).cloned();
+        Ok(AppState {
+            started: Instant::now(),
+            image_roots,
+            images,
+            featured,
+        })
     }
-    Ok(())
-}
 
-unsafe extern "system" fn window_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_CREATE => {
-            let create = lparam.0 as *const CREATESTRUCTW;
-            let state = (*create).lpCreateParams as *mut AppState;
-            windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
-                hwnd,
-                windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
-                state as isize,
-            );
-            LRESULT(0)
-        }
-        WM_TIMER => {
-            let _ = InvalidateRect(Some(hwnd), None, false);
-            LRESULT(0)
-        }
-        WM_MOUSEMOVE => {
-            let state = state_from_hwnd(hwnd);
-            let x = loword(lparam.0 as u32) as i16 as i32;
-            let y = hiword(lparam.0 as u32) as i16 as i32;
-            if let Some(state) = state {
-                if let Some((last_x, last_y)) = state.last_mouse {
-                    if (x - last_x).abs() > 4 || (y - last_y).abs() > 4 {
-                        let _ = DestroyWindow(hwnd);
-                    }
-                }
-                state.last_mouse = Some((x, y));
-            }
-            LRESULT(0)
-        }
-        WM_KEYDOWN | WM_LBUTTONDOWN => {
-            let _ = DestroyWindow(hwnd);
-            LRESULT(0)
-        }
-        WM_PAINT => {
-            paint(hwnd);
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            let state = state_from_hwnd(hwnd).map(|s| s as *mut AppState);
-            if let Some(state) = state {
-                drop(Box::from_raw(state));
-            }
-            PostQuitMessage(0);
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    fn configure(&mut self, parent: Option<HWND>) -> windows::core::Result<()> {
+        launch_config_dialog(parent)
+    }
+
+    unsafe fn paint(&mut self, hwnd: HWND, state: &mut Self::State) {
+        paint(hwnd, state);
+    }
+
+    unsafe fn timer(&mut self, hwnd: HWND, _state: &mut Self::State) {
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
     }
 }
 
-unsafe fn state_from_hwnd(hwnd: HWND) -> Option<&'static mut AppState> {
-    let raw = windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
-        hwnd,
-        windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
-    );
-    (raw != 0).then(|| &mut *(raw as *mut AppState))
-}
-
-unsafe fn paint(hwnd: HWND) {
+unsafe fn paint(hwnd: HWND, state: &mut AppState) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
     let mut rect = RECT::default();
@@ -260,23 +101,21 @@ unsafe fn paint(hwnd: HWND) {
     FillRect(hdc, &rect, brush);
     let _ = DeleteObject(brush.into());
 
-    if let Some(state) = state_from_hwnd(hwnd) {
-        let elapsed = state.started.elapsed().as_secs_f32();
-        let glow = ((elapsed.sin() + 1.0) * 70.0 + 90.0) as u8;
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, COLORREF((glow as u32) << 8 | 0x40));
+    let elapsed = state.started.elapsed().as_secs_f32();
+    let glow = ((elapsed.sin() + 1.0) * 70.0 + 90.0) as u8;
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, COLORREF((glow as u32) << 8 | 0x40));
 
-        let lines = status_lines(state);
-        for (index, line) in lines.iter().enumerate() {
-            let text = wide(line);
-            let _ = TextOutW(hdc, 48, 48 + (index as i32 * 24), &text[..text.len() - 1]);
-        }
+    let lines = status_lines(state);
+    for (index, line) in lines.iter().enumerate() {
+        let text = wide(line);
+        let _ = TextOutW(hdc, 48, 48 + (index as i32 * 24), &text[..text.len() - 1]);
     }
 
     let _ = EndPaint(hwnd, &ps);
 }
 
-fn launch_config_dialog() -> windows::core::Result<()> {
+fn launch_config_dialog(parent: Option<HWND>) -> windows::core::Result<()> {
     let config_exe = std::env::current_exe().ok().and_then(|path| {
         path.parent()
             .map(|parent| parent.join("octoglow-config-ui.exe"))
@@ -295,7 +134,7 @@ fn launch_config_dialog() -> windows::core::Result<()> {
     let config_exe = wide_path(&config_exe);
     let result = unsafe {
         ShellExecuteW(
-            None,
+            parent,
             w!("open"),
             PCWSTR(config_exe.as_ptr()),
             PCWSTR::null(),
@@ -525,24 +364,12 @@ fn pick_random<T>(items: &[T]) -> Option<&T> {
     items.get(nanos % items.len())
 }
 
-fn loword(value: u32) -> u16 {
-    (value & 0xffff) as u16
-}
-
-fn hiword(value: u32) -> u16 {
-    ((value >> 16) & 0xffff) as u16
-}
-
 fn wide(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(once(0)).collect()
 }
 
 fn wide_path(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(once(0)).collect()
-}
-
-fn null_hwnd() -> HWND {
-    HWND(null_mut())
 }
 
 fn show_message(message: &str) {

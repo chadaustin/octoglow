@@ -11,6 +11,7 @@ use scrnsave::{RunMode, ScreenSaver, ScreenSaverConfig};
 use serde::Deserialize;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, COLORREF, GENERIC_READ, HWND, RECT};
+use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, SetBkMode, SetTextColor,
     StretchDIBits, TextOutW, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBRUSH,
@@ -62,6 +63,7 @@ struct AppState {
     candidate_count: usize,
     decode_failure_count: usize,
     images: Vec<DecodedImage>,
+    render_cache: Option<RenderCache>,
 }
 
 struct DecodedImage {
@@ -71,11 +73,19 @@ struct DecodedImage {
     pixels: Vec<u8>,
 }
 
+struct RenderCache {
+    width: u32,
+    height: u32,
+    frames: Vec<Vec<u8>>,
+}
+
 impl ScreenSaver for OctoglowScreensaver {
     type State = AppState;
 
     fn config(&self) -> ScreenSaverConfig {
-        ScreenSaverConfig::new("OctoglowScreenSaver", "Octoglow")
+        let mut config = ScreenSaverConfig::new("OctoglowScreenSaver", "Octoglow");
+        config.timer_ms = 16;
+        config
     }
 
     fn initialize(&mut self, _mode: RunMode) -> windows::core::Result<Self::State> {
@@ -87,6 +97,7 @@ impl ScreenSaver for OctoglowScreensaver {
             candidate_count: scan.candidate_count,
             decode_failure_count: scan.decode_failure_count,
             images: scan.images,
+            render_cache: None,
         })
     }
 
@@ -140,6 +151,7 @@ unsafe fn paint(hwnd: HWND, state: &mut AppState) {
     }
 
     let _ = EndPaint(hwnd, &ps);
+    let _ = DwmFlush();
 }
 
 fn launch_config_dialog(parent: Option<HWND>) -> windows::core::Result<()> {
@@ -318,35 +330,67 @@ fn current_image(state: &AppState) -> Option<&DecodedImage> {
     state.images.get(current)
 }
 
-fn render_frame(state: &AppState, width: u32, height: u32) -> Vec<u8> {
-    let mut frame = vec![0; width.saturating_mul(height).saturating_mul(4) as usize];
-    if state.images.is_empty() {
+fn render_frame(state: &mut AppState, width: u32, height: u32) -> Vec<u8> {
+    ensure_render_cache(state, width, height);
+    let mut frame = black_frame(width, height);
+
+    let Some(cache) = &state.render_cache else {
         return frame;
-    }
+    };
 
     let elapsed = state.started.elapsed().as_secs_f32();
     let (current, next, alpha_next) = playback_indices(state, elapsed);
-    let alpha_current = if elapsed < 2.0 {
-        (elapsed / 2.0).max(0.08)
-    } else {
-        1.0 - alpha_next
-    };
 
-    if let Some(image) = state.images.get(current) {
-        blend_image_into_frame(
-            image,
-            &mut frame,
-            width,
-            height,
-            alpha_current.clamp(0.0, 1.0),
-        );
-    }
-    if alpha_next > 0.0 {
-        if let Some(image) = state.images.get(next) {
-            blend_image_into_frame(image, &mut frame, width, height, alpha_next.clamp(0.0, 1.0));
+    if elapsed < 2.0 {
+        let alpha = ((elapsed / 2.0).max(0.08) * 255.0).round() as u8;
+        if let Some(source) = cache.frames.get(current) {
+            fade_from_black(source, &mut frame, alpha);
+        }
+    } else if current == next || alpha_next <= 0.0 {
+        if let Some(source) = cache.frames.get(current) {
+            frame.copy_from_slice(source);
+        }
+    } else {
+        if let (Some(from), Some(to)) = (cache.frames.get(current), cache.frames.get(next)) {
+            let alpha = (alpha_next.clamp(0.0, 1.0) * 255.0).round() as u8;
+            crossfade_frames(from, to, &mut frame, alpha);
         }
     }
 
+    frame
+}
+
+fn ensure_render_cache(state: &mut AppState, width: u32, height: u32) {
+    let cache_matches = state
+        .render_cache
+        .as_ref()
+        .map(|cache| {
+            cache.width == width
+                && cache.height == height
+                && cache.frames.len() == state.images.len()
+        })
+        .unwrap_or(false);
+    if cache_matches {
+        return;
+    }
+
+    let frames = state
+        .images
+        .iter()
+        .map(|image| scaled_image_frame(image, width, height))
+        .collect();
+    state.render_cache = Some(RenderCache {
+        width,
+        height,
+        frames,
+    });
+}
+
+fn black_frame(width: u32, height: u32) -> Vec<u8> {
+    let mut frame = vec![0; width.saturating_mul(height).saturating_mul(4) as usize];
+    for pixel in frame.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
     frame
 }
 
@@ -386,15 +430,10 @@ fn playback_indices(state: &AppState, elapsed: f32) -> (usize, usize, f32) {
     (current, next, alpha_next)
 }
 
-fn blend_image_into_frame(
-    image: &DecodedImage,
-    frame: &mut [u8],
-    width: u32,
-    height: u32,
-    alpha: f32,
-) {
-    if alpha <= 0.0 || image.width == 0 || image.height == 0 || width == 0 || height == 0 {
-        return;
+fn scaled_image_frame(image: &DecodedImage, width: u32, height: u32) -> Vec<u8> {
+    let mut frame = black_frame(width, height);
+    if image.width == 0 || image.height == 0 || width == 0 || height == 0 {
+        return frame;
     }
 
     let scale = (width as f32 / image.width as f32).min(height as f32 / image.height as f32);
@@ -413,14 +452,41 @@ fn blend_image_into_frame(
             let src_x = ((x as u64 * image.width as u64) / draw_width as u64) as u32;
             let src_idx = ((src_y * image.width + src_x) * 4) as usize;
             let dst_idx = (((offset_y + y) * width + (offset_x + x)) * 4) as usize;
+            let alpha = image.pixels[src_idx + 3] as u32;
 
             for channel in 0..3 {
-                let src = image.pixels[src_idx + channel] as f32;
-                let dst = frame[dst_idx + channel] as f32;
-                frame[dst_idx + channel] = (dst + (src - dst) * alpha).round() as u8;
+                frame[dst_idx + channel] =
+                    ((image.pixels[src_idx + channel] as u32 * alpha) / 255) as u8;
             }
             frame[dst_idx + 3] = 255;
         }
+    }
+
+    frame
+}
+
+fn fade_from_black(source: &[u8], destination: &mut [u8], alpha: u8) {
+    let alpha = alpha as u32;
+    for (src, dst) in source.chunks_exact(4).zip(destination.chunks_exact_mut(4)) {
+        dst[0] = ((src[0] as u32 * alpha) / 255) as u8;
+        dst[1] = ((src[1] as u32 * alpha) / 255) as u8;
+        dst[2] = ((src[2] as u32 * alpha) / 255) as u8;
+        dst[3] = 255;
+    }
+}
+
+fn crossfade_frames(from: &[u8], to: &[u8], destination: &mut [u8], alpha: u8) {
+    let alpha_to = alpha as u32;
+    let alpha_from = 255 - alpha_to;
+    for ((from, to), dst) in from
+        .chunks_exact(4)
+        .zip(to.chunks_exact(4))
+        .zip(destination.chunks_exact_mut(4))
+    {
+        dst[0] = ((from[0] as u32 * alpha_from + to[0] as u32 * alpha_to) / 255) as u8;
+        dst[1] = ((from[1] as u32 * alpha_from + to[1] as u32 * alpha_to) / 255) as u8;
+        dst[2] = ((from[2] as u32 * alpha_from + to[2] as u32 * alpha_to) / 255) as u8;
+        dst[3] = 255;
     }
 }
 

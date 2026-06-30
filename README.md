@@ -5,6 +5,7 @@ Octoglow is a native Win32 screensaver written in Rust. The goal is to let the u
 This repository currently contains the first skeleton:
 
 - a Rust workspace with the `octoglow` screensaver binary;
+- a `scrnsave` crate that implements the screensaver command-line protocol, fullscreen/preview window setup, message loop, timer, and input-to-dismiss behavior normally hidden by `Scrnsave.lib`;
 - a Tauri-based `octoglow-config-ui` companion binary for the configuration dialog;
 - an `xtask` build command that emits `target/release/octoglow.scr` and `target/release/octoglow-config-ui.exe`;
 - Win32 screensaver mode routing for `/s`, `/c`, `/p`, and `/a`;
@@ -48,15 +49,22 @@ Windows screensavers are ordinary executables renamed to `.scr`. The shell invok
 ```powershell
 target\release\octoglow.scr /s
 target\release\octoglow.scr /c
+target\release\octoglow.scr /c:<parent-hwnd>
 target\release\octoglow.scr /p <parent-hwnd>
+target\release\octoglow.scr /p:<parent-hwnd>
+target\release\octoglow.scr /a <parent-hwnd>
 ```
 
 Current behavior:
 
 - `/s` opens a borderless fullscreen Win32 window, scans configured folders, and paints a placeholder animated status line.
 - `/c` launches `octoglow-config-ui.exe`, which should be next to the `.scr` file.
+- `/c:<hwnd>` also launches configuration, passing the parent HWND as the ShellExecute owner.
 - `/p` creates a small preview window skeleton.
-- `/a` is accepted as the password-change mode and currently exits.
+- `/p:<hwnd>` is accepted in addition to `/p <hwnd>`.
+- `/a` and `/a:<hwnd>` are accepted as password-change modes and currently exit.
+
+The `scrnsave` crate owns these mode semantics and exposes a Rust `ScreenSaver` trait. The `octoglow` crate supplies rendering, timer, and configuration callbacks through that trait.
 
 ## Configuration
 

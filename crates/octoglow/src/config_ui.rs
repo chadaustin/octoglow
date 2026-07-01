@@ -15,7 +15,14 @@ struct FolderNode {
 
 #[derive(Deserialize, Serialize, Default)]
 struct Settings {
+    #[serde(default)]
     folders: Vec<String>,
+    #[serde(default = "default_memory_cap_mb")]
+    memory_cap_mb: u64,
+}
+
+fn default_memory_cap_mb() -> u64 {
+    1024
 }
 
 pub fn run(_parent: Option<HWND>) -> windows::core::Result<()> {
@@ -124,24 +131,35 @@ fn config_file() -> windows::core::Result<PathBuf> {
 }
 
 fn load_config() -> windows::core::Result<Vec<PathBuf>> {
+    let settings = load_settings()?;
+    Ok(settings.folders.into_iter().map(PathBuf::from).collect())
+}
+
+fn load_settings() -> windows::core::Result<Settings> {
     let file = config_file()?;
     if !file.exists() {
-        return Ok(Vec::new());
+        return Ok(Settings {
+            folders: Vec::new(),
+            memory_cap_mb: default_memory_cap_mb(),
+        });
     }
 
     let bytes = fs::read(&file).map_err(io_error)?;
     let text = String::from_utf8_lossy(&bytes);
-    let settings = toml::from_str::<Settings>(&text).unwrap_or_default();
-    Ok(settings.folders.into_iter().map(PathBuf::from).collect())
+    Ok(
+        toml::from_str::<Settings>(&text).unwrap_or_else(|_| Settings {
+            folders: Vec::new(),
+            memory_cap_mb: default_memory_cap_mb(),
+        }),
+    )
 }
 
 fn save_config(paths: &[PathBuf]) -> windows::core::Result<()> {
-    let settings = Settings {
-        folders: paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect(),
-    };
+    let mut settings = load_settings()?;
+    settings.folders = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
     let contents = toml::to_string_pretty(&settings).map_err(|error| {
         windows::core::Error::new(HRESULT(0x80004005u32 as i32), error.to_string())
     })?;

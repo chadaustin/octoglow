@@ -4,6 +4,8 @@
 mod app;
 #[cfg(windows)]
 mod config_ui;
+#[cfg(windows)]
+mod traversal;
 
 #[cfg(windows)]
 fn main() -> windows::core::Result<()> {

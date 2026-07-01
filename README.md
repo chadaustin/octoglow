@@ -103,7 +103,7 @@ Image selection is split from decoding. At screensaver startup, a background sel
 
 Each selected candidate file is then opened with Windows Imaging Component. PNG and JPEG should work on standard Windows installations. HEIC/HEIF depends on the installed WIC codec, typically supplied by Microsoft's HEIF Image Extensions.
 
-Decoded image memory is bounded by `memory_cap_mb`, which defaults to 1024. Octoglow estimates decoded image cost as `width * height * 4` bytes and stops adding decoded images when the cap is reached. A decoder worker performs WIC decode into BGRA CPU pixels off the render thread. The render thread only drains ready decoded images and uploads them into Direct2D bitmaps. The intended next step is to make that cache explicitly target the current and next pictures for hitch-free crossfades.
+Decoded image memory is bounded by `memory_cap_mb`, which defaults to 1024. Octoglow estimates decoded image cost as `width * height * 4` bytes and stops adding decoded images when the cap is reached. A decoder worker performs WIC decode into BGRA CPU pixels off the render thread. The render thread only drains ready decoded images and incrementally uploads missing current/next Direct2D bitmaps, avoiding full cache rebuilds during playback. The intended next step is to make that cache explicitly target the current and next pictures for hitch-free crossfades.
 
 ## Next Implementation Steps
 

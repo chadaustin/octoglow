@@ -10,9 +10,9 @@ This repository currently contains:
 - an `xtask` build command that emits `target/release/octoglow.scr`;
 - Win32 screensaver mode routing for `/s`, `/c`, `/p`, and `/a`;
 - a Win32-like configuration dialog with a checkbox tree view for selecting folders;
-- configuration persisted as TOML under `%APPDATA%\Octoglow\settings.toml`;
-- recursive folder scanning through Win32 file APIs (`FindFirstFileW`, `FindNextFileW`);
-- config file I/O through Win32 file APIs (`CreateFileW`, `ReadFile`, `WriteFile`);
+- configuration persisted as TOML under the local config directory, usually `%LOCALAPPDATA%\Octoglow\settings.toml` on Windows;
+- recursive folder scanning through `FindFirstFileExW` with `FIND_FIRST_EX_LARGE_FETCH`;
+- config file I/O through safe Rust standard library filesystem APIs;
 - WIC probing for PNG, JPEG, and HEIC/HEIF containers.
 
 ## Requirements
@@ -67,10 +67,10 @@ The `scrnsave` crate owns these mode semantics and exposes a Rust `ScreenSaver` 
 
 ## Configuration
 
-The configuration UI is embedded in the screensaver binary and presents a Win32-like dialog with a filesystem tree and checkboxes. It saves the selected folders to:
+The configuration UI is embedded in the screensaver binary and presents a Win32-like dialog with a filesystem tree and checkboxes. It saves the selected folders through `dirs::config_local_dir()`, which is usually:
 
 ```text
-%APPDATA%\Octoglow\settings.toml
+%LOCALAPPDATA%\Octoglow\settings.toml
 ```
 
 The current format is:
@@ -82,9 +82,9 @@ folders = [
 ]
 ```
 
-The tree contents are supplied by Rust commands that enumerate drives and directories with Win32 file APIs. The UI currently hides hidden and system directories, loads child folders on demand, and stores selected folders when Save is clicked.
+The tree contents are supplied by Rust commands that enumerate drives and directories. Drive roots come from the Win32 `GetLogicalDrives` API; directory traversal uses `FindFirstFileExW` with `FIND_FIRST_EX_LARGE_FETCH` and avoids reparse-point recursion. The UI currently hides hidden and system directories, loads child folders on demand, and stores selected folders when Save is clicked.
 
-For compatibility during early development, Octoglow can still read the previous `%APPDATA%\Octoglow\folders.txt` line-based format if `settings.toml` does not exist. Saving always writes `settings.toml`.
+Only the TOML file under the local config directory is supported. Earlier development formats are intentionally ignored.
 
 Only `octoglow.scr` is needed for installation or manual testing.
 
@@ -104,8 +104,7 @@ Each candidate file is then opened with Windows Imaging Component. PNG and JPEG 
 
 Good follow-up work:
 
-- Replace placeholder painting with real WIC image decoding and GDI, Direct2D, or DirectComposition rendering.
-- Add gentle pan, scale, fade-in, and fade-out animation.
+- Add gentle pan and scale animation.
 - Track image metadata and cache scan results to avoid a full recursive scan on every launch.
 - Add video support through Media Foundation.
 - Add an installer or documented manual install step that copies `octoglow.scr` to the appropriate Windows screensaver location.

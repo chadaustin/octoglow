@@ -1,18 +1,10 @@
-#![allow(unsafe_op_in_unsafe_fn)]
-
-use std::iter::once;
-use std::os::windows::ffi::OsStrExt;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use windows::core::{HRESULT, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND};
-use windows::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileAttributesW,
-    GetLogicalDrives, ReadFile, WriteFile, CREATE_ALWAYS, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_SYSTEM, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, WIN32_FIND_DATAW,
-};
+use windows::core::HRESULT;
+use windows::Win32::Foundation::HWND;
+use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 
 #[derive(Serialize)]
 struct FolderNode {
@@ -94,124 +86,53 @@ fn close_window(window: tauri::Window) -> Result<(), String> {
 }
 
 fn collect_child_folders(root: &Path, folders: &mut Vec<FolderNode>) {
-    let pattern = root.join("*");
-    let mut find_data = WIN32_FIND_DATAW::default();
-    let pattern = wide_path(&pattern);
-
-    unsafe {
-        let handle = match FindFirstFileW(
-            PCWSTR(pattern.as_ptr()),
-            &mut find_data as *mut WIN32_FIND_DATAW,
-        ) {
-            Ok(handle) => handle,
-            Err(_) => return,
-        };
-
-        loop {
-            if is_visible_directory(&find_data) {
-                if let Some(name) = filename_from_find_data(&find_data) {
-                    if name != "." && name != ".." {
-                        let path = root.join(&name);
-                        folders.push(FolderNode {
-                            name,
-                            path: path.display().to_string(),
-                            has_children: directory_has_child_folder(&path),
-                        });
-                    }
-                }
-            }
-
-            if FindNextFileW(handle, &mut find_data).is_err() {
-                break;
-            }
+    crate::traversal::for_each_child(root, |entry| {
+        if !is_visible_directory(&entry) {
+            return true;
         }
 
-        let _ = FindClose(handle);
-    }
+        folders.push(FolderNode {
+            name: entry.name,
+            path: entry.path.display().to_string(),
+            has_children: directory_has_child_folder(&entry.path),
+        });
+        true
+    });
 }
 
-fn is_visible_directory(data: &WIN32_FIND_DATAW) -> bool {
-    let attrs = data.dwFileAttributes;
-    attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0
-        && attrs & FILE_ATTRIBUTE_SYSTEM.0 == 0
-        && attrs & FILE_ATTRIBUTE_HIDDEN.0 == 0
+fn is_visible_directory(entry: &crate::traversal::DirectoryEntry) -> bool {
+    entry.is_directory() && !entry.is_hidden_or_system() && !entry.is_reparse_point()
 }
 
 fn directory_has_child_folder(path: &Path) -> bool {
-    let pattern = path.join("*");
-    let mut find_data = WIN32_FIND_DATAW::default();
-    let pattern = wide_path(&pattern);
-
-    unsafe {
-        let handle = match FindFirstFileW(
-            PCWSTR(pattern.as_ptr()),
-            &mut find_data as *mut WIN32_FIND_DATAW,
-        ) {
-            Ok(handle) => handle,
-            Err(_) => return false,
-        };
-
-        loop {
-            if is_visible_directory(&find_data) {
-                if let Some(name) = filename_from_find_data(&find_data) {
-                    if name != "." && name != ".." {
-                        let _ = FindClose(handle);
-                        return true;
-                    }
-                }
-            }
-
-            if FindNextFileW(handle, &mut find_data).is_err() {
-                break;
-            }
+    let mut found = false;
+    crate::traversal::for_each_child(path, |entry| {
+        if !found && is_visible_directory(&entry) {
+            found = true;
+            return false;
         }
-
-        let _ = FindClose(handle);
-    }
-
-    false
+        true
+    });
+    found
 }
 
 fn config_file() -> windows::core::Result<PathBuf> {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = dirs::config_local_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join("Octoglow");
     ensure_directory(&dir)?;
     Ok(dir.join("settings.toml"))
 }
 
-fn legacy_config_file() -> windows::core::Result<PathBuf> {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let dir = base.join("Octoglow");
-    ensure_directory(&dir)?;
-    Ok(dir.join("folders.txt"))
-}
-
 fn load_config() -> windows::core::Result<Vec<PathBuf>> {
     let file = config_file()?;
-    if file.exists() {
-        let bytes = read_file(&file)?;
-        let text = String::from_utf8_lossy(&bytes);
-        let settings = toml::from_str::<Settings>(&text).unwrap_or_default();
-        return Ok(settings.folders.into_iter().map(PathBuf::from).collect());
-    }
-
-    let legacy_file = legacy_config_file()?;
-    if !legacy_file.exists() {
+    if !file.exists() {
         return Ok(Vec::new());
     }
 
-    let bytes = read_file(&legacy_file)?;
+    let bytes = fs::read(&file).map_err(io_error)?;
     let text = String::from_utf8_lossy(&bytes);
-    Ok(text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(PathBuf::from)
-        .collect())
+    let settings = toml::from_str::<Settings>(&text).unwrap_or_default();
+    Ok(settings.folders.into_iter().map(PathBuf::from).collect())
 }
 
 fn save_config(paths: &[PathBuf]) -> windows::core::Result<()> {
@@ -221,81 +142,16 @@ fn save_config(paths: &[PathBuf]) -> windows::core::Result<()> {
             .map(|path| path.display().to_string())
             .collect(),
     };
-    let contents = toml::to_string_pretty(&settings).unwrap_or_default();
-    write_file(&config_file()?, contents.as_bytes())
+    let contents = toml::to_string_pretty(&settings).map_err(|error| {
+        windows::core::Error::new(HRESULT(0x80004005u32 as i32), error.to_string())
+    })?;
+    fs::write(config_file()?, contents).map_err(io_error)
 }
 
 fn ensure_directory(path: &Path) -> windows::core::Result<()> {
-    let path_w = wide_path(path);
-    unsafe {
-        let attrs = GetFileAttributesW(PCWSTR(path_w.as_ptr()));
-        if attrs != u32::MAX && attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
-            return Ok(());
-        }
-        let _ = CreateDirectoryW(PCWSTR(path_w.as_ptr()), None);
-    }
-    Ok(())
+    fs::create_dir_all(path).map_err(io_error)
 }
 
-fn read_file(path: &Path) -> windows::core::Result<Vec<u8>> {
-    let path_w = wide_path(path);
-    unsafe {
-        let handle = CreateFileW(
-            PCWSTR(path_w.as_ptr()),
-            FILE_GENERIC_READ.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )?;
-        let mut data = Vec::new();
-        let mut buffer = [0u8; 4096];
-        loop {
-            let mut read = 0u32;
-            ReadFile(handle, Some(&mut buffer), Some(&mut read), None)?;
-            if read == 0 {
-                break;
-            }
-            data.extend_from_slice(&buffer[..read as usize]);
-        }
-        CloseHandle(handle)?;
-        Ok(data)
-    }
-}
-
-fn write_file(path: &Path, data: &[u8]) -> windows::core::Result<()> {
-    let path_w = wide_path(path);
-    unsafe {
-        let handle = CreateFileW(
-            PCWSTR(path_w.as_ptr()),
-            FILE_GENERIC_WRITE.0,
-            FILE_SHARE_READ,
-            None,
-            CREATE_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )?;
-        let mut written = 0u32;
-        WriteFile(handle, Some(data), Some(&mut written), None)?;
-        CloseHandle(handle)?;
-    }
-    Ok(())
-}
-
-fn filename_from_find_data(data: &WIN32_FIND_DATAW) -> Option<String> {
-    let len = data
-        .cFileName
-        .iter()
-        .position(|ch| *ch == 0)
-        .unwrap_or(data.cFileName.len());
-    if len == 0 {
-        None
-    } else {
-        Some(String::from_utf16_lossy(&data.cFileName[..len]))
-    }
-}
-
-fn wide_path(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(once(0)).collect()
+fn io_error(error: std::io::Error) -> windows::core::Error {
+    windows::core::Error::new(HRESULT(0x80004005u32 as i32), error.to_string())
 }

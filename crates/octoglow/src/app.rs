@@ -1,15 +1,14 @@
-#![allow(unsafe_op_in_unsafe_fn)]
-
 use std::ffi::OsStr;
+use std::fs;
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use scrnsave::{RunMode, ScreenSaver, ScreenSaverConfig};
 use serde::Deserialize;
 use windows::core::{w, Interface, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, COLORREF, GENERIC_READ, HMODULE, HWND, RECT};
+use windows::Win32::Foundation::{COLORREF, GENERIC_READ, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
@@ -41,11 +40,6 @@ use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatHeif, GUID_ContainerFormatJpeg,
     GUID_ContainerFormatPng, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
     WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand,
-};
-use windows::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, FindClose, FindFirstFileW, FindNextFileW, GetFileAttributesW,
-    ReadFile, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -91,6 +85,8 @@ struct DecodedImage {
     source: windows::Win32::Graphics::Imaging::IWICBitmapSource,
 }
 
+const MAX_STARTUP_IMAGES: usize = 12;
+
 struct Direct2DState {
     width: u32,
     height: u32,
@@ -131,36 +127,40 @@ impl ScreenSaver for OctoglowScreensaver {
     }
 
     unsafe fn timer(&mut self, hwnd: HWND, _state: &mut Self::State) {
-        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+        }
     }
 }
 
-unsafe fn paint(hwnd: HWND, state: &mut AppState) {
+fn paint(hwnd: HWND, state: &mut AppState) {
     let mut rect = RECT::default();
-    let _ = GetClientRect(hwnd, &mut rect);
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut rect);
+    }
     let width = (rect.right - rect.left).max(1) as u32;
     let height = (rect.bottom - rect.top).max(1) as u32;
 
     if !state.images.is_empty() && render_with_direct2d(hwnd, state, width, height).is_ok() {
-        let _ = ValidateRect(Some(hwnd), None);
-        let _ = DwmFlush();
+        unsafe {
+            let _ = ValidateRect(Some(hwnd), None);
+            let _ = DwmFlush();
+        }
         return;
     }
 
     let mut ps = PAINTSTRUCT::default();
-    let hdc = BeginPaint(hwnd, &mut ps);
+    let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
 
     let elapsed = state.started.elapsed().as_secs_f32();
     let glow = ((elapsed.sin() + 1.0) * 70.0 + 90.0) as u8;
-    SetBkMode(hdc, TRANSPARENT);
+    unsafe {
+        SetBkMode(hdc, TRANSPARENT);
+    }
 
     let lines = status_lines(state);
 
-    if state.images.is_empty() {
-        let brush: HBRUSH = CreateSolidBrush(COLORREF(0x00101410));
-        FillRect(hdc, &rect, brush);
-        let _ = DeleteObject(brush.into());
-    } else {
+    unsafe {
         let brush: HBRUSH = CreateSolidBrush(COLORREF(0x00101410));
         FillRect(hdc, &rect, brush);
         let _ = DeleteObject(brush.into());
@@ -171,15 +171,21 @@ unsafe fn paint(hwnd: HWND, state: &mut AppState) {
     } else {
         COLORREF(0x00f0f0f0)
     };
-    SetTextColor(hdc, text_color);
+    unsafe {
+        SetTextColor(hdc, text_color);
+    }
 
     for (index, line) in lines.iter().enumerate() {
         let text = wide(line);
-        let _ = TextOutW(hdc, 48, 48 + (index as i32 * 24), &text[..text.len() - 1]);
+        unsafe {
+            let _ = TextOutW(hdc, 48, 48 + (index as i32 * 24), &text[..text.len() - 1]);
+        }
     }
 
-    let _ = EndPaint(hwnd, &ps);
-    let _ = DwmFlush();
+    unsafe {
+        let _ = EndPaint(hwnd, &ps);
+        let _ = DwmFlush();
+    }
 }
 
 fn launch_config_dialog(parent: Option<HWND>) -> windows::core::Result<()> {
@@ -204,17 +210,22 @@ fn collect_images(roots: &[PathBuf]) -> ImageScan {
     }
 
     let candidate_count = candidates.len();
+    shuffle_paths(&mut candidates);
     let mut decode_failure_count = 0;
-    let images = candidates
-        .into_iter()
-        .filter_map(|path| match decode_image_with_wic(&path) {
-            Ok(image) => Some(image),
+    let mut images = Vec::new();
+    for path in candidates {
+        match decode_image_with_wic(&path) {
+            Ok(image) => {
+                images.push(image);
+                if images.len() >= MAX_STARTUP_IMAGES {
+                    break;
+                }
+            }
             Err(_) => {
                 decode_failure_count += 1;
-                None
             }
-        })
-        .collect();
+        }
+    }
 
     ImageScan {
         candidate_count,
@@ -223,39 +234,32 @@ fn collect_images(roots: &[PathBuf]) -> ImageScan {
     }
 }
 
-fn collect_image_candidates(root: &Path, images: &mut Vec<PathBuf>) {
-    let pattern = root.join("*");
-    let mut find_data = WIN32_FIND_DATAW::default();
-    let pattern = wide_path(&pattern);
+fn shuffle_paths(paths: &mut [PathBuf]) {
+    let mut state = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0x9e3779b97f4a7c15);
 
-    unsafe {
-        let handle = match FindFirstFileW(
-            PCWSTR(pattern.as_ptr()),
-            &mut find_data as *mut WIN32_FIND_DATAW,
-        ) {
-            Ok(handle) => handle,
-            Err(_) => return,
-        };
-
-        loop {
-            if let Some(name) = filename_from_find_data(&find_data) {
-                if name != "." && name != ".." {
-                    let child = root.join(&name);
-                    if find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
-                        collect_image_candidates(&child, images);
-                    } else if has_supported_extension(&child) {
-                        images.push(child);
-                    }
-                }
-            }
-
-            if FindNextFileW(handle, &mut find_data).is_err() {
-                break;
-            }
-        }
-
-        let _ = FindClose(handle);
+    for index in (1..paths.len()).rev() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        paths.swap(index, (state as usize) % (index + 1));
     }
+}
+
+fn collect_image_candidates(root: &Path, images: &mut Vec<PathBuf>) {
+    crate::traversal::for_each_child(root, |entry| {
+        if entry.is_reparse_point() {
+            return true;
+        }
+        if entry.is_directory() {
+            collect_image_candidates(&entry.path, images);
+        } else if entry.is_file() && has_supported_extension(&entry.path) {
+            images.push(entry.path);
+        }
+        true
+    });
 }
 
 fn has_supported_extension(path: &Path) -> bool {
@@ -273,7 +277,11 @@ fn has_supported_extension(path: &Path) -> bool {
 fn status_lines(state: &AppState) -> Vec<String> {
     if let Some(image) = current_image(state) {
         return vec![
-            format!("Octoglow found {} image(s).", state.images.len()),
+            format!(
+                "Octoglow loaded {} of {} image candidate(s).",
+                state.images.len(),
+                state.candidate_count
+            ),
             format!("Showing: {}", image.path.display()),
         ];
     }
@@ -358,14 +366,21 @@ fn render_with_direct2d(
     width: u32,
     height: u32,
 ) -> windows::core::Result<()> {
+    if state.images.is_empty() {
+        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+            0x80004005u32 as i32,
+        )));
+    }
+
     let elapsed = state.started.elapsed().as_secs_f32();
     let (current, next, alpha_next) = playback_indices(state, elapsed);
+    ensure_direct2d_state(hwnd, state, width, height)?;
+    let d2d = state.d2d.as_ref().expect("Direct2D state was initialized");
     let image_rects = state
         .images
         .iter()
         .map(|image| fitted_rect(image.width, image.height, width, height))
         .collect::<Vec<_>>();
-    let d2d = ensure_direct2d_state(hwnd, state, width, height)?;
     let black = D2D1_COLOR_F {
         r: 0.0,
         g: 0.0,
@@ -579,99 +594,26 @@ fn draw_direct2d_bitmap(d2d: &Direct2DState, rects: &[D2D_RECT_F], index: usize,
 }
 
 fn config_file() -> windows::core::Result<PathBuf> {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = dirs::config_local_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join("Octoglow");
     ensure_directory(&dir)?;
     Ok(dir.join("settings.toml"))
 }
 
-fn legacy_config_file() -> windows::core::Result<PathBuf> {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let dir = base.join("Octoglow");
-    ensure_directory(&dir)?;
-    Ok(dir.join("folders.txt"))
-}
-
 fn load_config() -> windows::core::Result<Vec<PathBuf>> {
     let file = config_file()?;
-    if file.exists() {
-        let bytes = read_file(&file)?;
-        let text = String::from_utf8_lossy(&bytes);
-        let settings = toml::from_str::<Settings>(&text).unwrap_or_default();
-        return Ok(settings.folders.into_iter().map(PathBuf::from).collect());
-    }
-
-    let legacy_file = legacy_config_file()?;
-    if !legacy_file.exists() {
+    if !file.exists() {
         return Ok(Vec::new());
     }
 
-    let bytes = read_file(&legacy_file)?;
+    let bytes = fs::read(&file).map_err(io_error)?;
     let text = String::from_utf8_lossy(&bytes);
-    Ok(text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(PathBuf::from)
-        .collect())
+    let settings = toml::from_str::<Settings>(&text).unwrap_or_default();
+    Ok(settings.folders.into_iter().map(PathBuf::from).collect())
 }
 
 fn ensure_directory(path: &Path) -> windows::core::Result<()> {
-    let path_w = wide_path(path);
-    unsafe {
-        let attrs = GetFileAttributesW(PCWSTR(path_w.as_ptr()));
-        if attrs != u32::MAX && attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
-            return Ok(());
-        }
-        if CreateDirectoryW(PCWSTR(path_w.as_ptr()), None).is_ok() {
-            return Ok(());
-        }
-    }
-    Ok(())
-}
-
-fn read_file(path: &Path) -> windows::core::Result<Vec<u8>> {
-    let path_w = wide_path(path);
-    unsafe {
-        let handle = CreateFileW(
-            PCWSTR(path_w.as_ptr()),
-            FILE_GENERIC_READ.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )?;
-        let mut data = Vec::new();
-        let mut buffer = [0u8; 4096];
-        loop {
-            let mut read = 0u32;
-            ReadFile(handle, Some(&mut buffer), Some(&mut read), None)?;
-            if read == 0 {
-                break;
-            }
-            data.extend_from_slice(&buffer[..read as usize]);
-        }
-        CloseHandle(handle)?;
-        Ok(data)
-    }
-}
-
-fn filename_from_find_data(data: &WIN32_FIND_DATAW) -> Option<String> {
-    let len = data
-        .cFileName
-        .iter()
-        .position(|ch| *ch == 0)
-        .unwrap_or(data.cFileName.len());
-    if len == 0 {
-        None
-    } else {
-        Some(String::from_utf16_lossy(&data.cFileName[..len]))
-    }
+    fs::create_dir_all(path).map_err(io_error)
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -692,4 +634,11 @@ fn show_message(message: &str) {
             MB_OK | MB_ICONINFORMATION,
         );
     }
+}
+
+fn io_error(error: std::io::Error) -> windows::core::Error {
+    windows::core::Error::new(
+        windows::core::HRESULT(0x80004005u32 as i32),
+        error.to_string(),
+    )
 }

@@ -99,18 +99,18 @@ Folder scanning accepts files with these extensions:
 - `.heic`
 - `.heif`
 
-Image selection is split from decoding. The selector samples a small number of photo-bearing directories by walking randomly through the configured roots and applying randomness at each level of the hierarchy. It does not need to load the full recursive tree before choosing images.
+Image selection is split from decoding. At screensaver startup, a background selector thread samples a small number of photo-bearing directories by walking randomly through the configured roots and applying randomness at each level of the hierarchy. It starts sending image candidates to the renderer as soon as the first sampled photo directory is found, so startup does not wait for a full recursive tree scan.
 
 Each selected candidate file is then opened with Windows Imaging Component. PNG and JPEG should work on standard Windows installations. HEIC/HEIF depends on the installed WIC codec, typically supplied by Microsoft's HEIF Image Extensions.
 
-Decoded image memory is bounded by `memory_cap_mb`, which defaults to 1024. Octoglow estimates decoded image cost as `width * height * 4` bytes and stops adding decoded images when the cap is reached. The renderer currently uploads the bounded decoded set to Direct2D bitmaps on the render thread. The intended next step is a decoder cache that probes/decodes ahead of presentation and keeps the current and next pictures ready for hitch-free crossfades.
+Decoded image memory is bounded by `memory_cap_mb`, which defaults to 1024. Octoglow estimates decoded image cost as `width * height * 4` bytes and stops adding decoded images when the cap is reached. A decoder worker performs WIC decode into BGRA CPU pixels off the render thread. The render thread only drains ready decoded images and uploads them into Direct2D bitmaps. The intended next step is to make that cache explicitly target the current and next pictures for hitch-free crossfades.
 
 ## Next Implementation Steps
 
 Good follow-up work:
 
 - Add gentle pan and scale animation.
-- Move image probing/decoding into a bounded decoder cache that prepares the next image before the crossfade.
+- Teach the decoder cache to prioritize the current and next image before each crossfade.
 - Track image metadata and cache scan results for large libraries.
 - Add video support through Media Foundation.
 - Add an installer or documented manual install step that copies `octoglow.scr` to the appropriate Windows screensaver location.

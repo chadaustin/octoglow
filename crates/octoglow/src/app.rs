@@ -3,6 +3,8 @@ use std::fs;
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use scrnsave::{RunMode, ScreenSaver, ScreenSaverConfig};
@@ -10,7 +12,7 @@ use serde::Deserialize;
 use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, GENERIC_READ, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image,
@@ -43,7 +45,7 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED,
+    COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MessageBoxW, MB_ICONINFORMATION, MB_OK,
@@ -88,10 +90,13 @@ struct OctoglowScreensaver;
 struct AppState {
     started: Instant,
     image_roots: Vec<PathBuf>,
+    decoded_rx: Receiver<DecodeMessage>,
+    selection_done: bool,
     candidate_count: usize,
     decode_failure_count: usize,
     memory_cap_bytes: u64,
     decoded_bytes: u64,
+    pending_decoded: Vec<DecodedImage>,
     images: Vec<DecodedImage>,
     d2d: Option<Direct2DState>,
 }
@@ -100,12 +105,20 @@ struct DecodedImage {
     path: PathBuf,
     width: u32,
     height: u32,
-    source: windows::Win32::Graphics::Imaging::IWICBitmapSource,
+    pixels: Vec<u8>,
 }
 
 const DEFAULT_MEMORY_CAP_MB: u64 = 1024;
 const PHOTO_DIRECTORY_SAMPLE_COUNT: usize = 5;
 const MAX_SELECTION_ATTEMPTS: usize = 128;
+const DECODE_QUEUE_CAPACITY: usize = 3;
+const MAX_UPLOADS_PER_FRAME: usize = 1;
+
+enum DecodeMessage {
+    Candidate,
+    Decoded(DecodedImage),
+    DecodeFailed,
+}
 
 struct Direct2DState {
     width: u32,
@@ -133,15 +146,18 @@ impl ScreenSaver for OctoglowScreensaver {
             .map(PathBuf::from)
             .collect::<Vec<_>>();
         let memory_cap_bytes = settings.memory_cap_mb.saturating_mul(1024 * 1024);
-        let scan = collect_images(&image_roots, memory_cap_bytes);
+        let decoded_rx = start_image_pipeline(image_roots.clone());
         Ok(AppState {
             started: Instant::now(),
             image_roots,
-            candidate_count: scan.candidate_count,
-            decode_failure_count: scan.decode_failure_count,
+            decoded_rx,
+            selection_done: false,
+            candidate_count: 0,
+            decode_failure_count: 0,
             memory_cap_bytes,
-            decoded_bytes: scan.decoded_bytes,
-            images: scan.images,
+            decoded_bytes: 0,
+            pending_decoded: Vec::new(),
+            images: Vec::new(),
             d2d: None,
         })
     }
@@ -168,6 +184,7 @@ fn paint(hwnd: HWND, state: &mut AppState) {
     }
     let width = (rect.right - rect.left).max(1) as u32;
     let height = (rect.bottom - rect.top).max(1) as u32;
+    service_decoded_queue(state);
 
     if !state.images.is_empty() && render_with_direct2d(hwnd, state, width, height).is_ok() {
         unsafe {
@@ -225,51 +242,49 @@ fn launch_config_dialog(parent: Option<HWND>) -> windows::core::Result<()> {
     Ok(())
 }
 
-struct ImageScan {
-    candidate_count: usize,
-    decode_failure_count: usize,
-    decoded_bytes: u64,
-    images: Vec<DecodedImage>,
+fn start_image_pipeline(roots: Vec<PathBuf>) -> Receiver<DecodeMessage> {
+    let (candidate_tx, candidate_rx) = mpsc::sync_channel::<PathBuf>(DECODE_QUEUE_CAPACITY);
+    let (decoded_tx, decoded_rx) = mpsc::sync_channel::<DecodeMessage>(DECODE_QUEUE_CAPACITY);
+
+    let selector_tx = candidate_tx.clone();
+    thread::spawn(move || {
+        let mut rng = RandomState::new();
+        stream_image_candidates(&roots, &mut rng, |path| selector_tx.send(path).is_ok());
+    });
+
+    thread::spawn(move || {
+        run_decoder(candidate_rx, decoded_tx);
+    });
+
+    decoded_rx
 }
 
-fn collect_images(roots: &[PathBuf], memory_cap_bytes: u64) -> ImageScan {
-    let mut rng = RandomState::new();
-    let candidates = select_image_candidates(roots, &mut rng);
-    let candidate_count = candidates.len();
-    let mut decode_failure_count = 0;
-    let mut decoded_bytes = 0u64;
-    let mut images = Vec::new();
+fn run_decoder(candidate_rx: Receiver<PathBuf>, decoded_tx: SyncSender<DecodeMessage>) {
+    let com_initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
+    while let Ok(path) = candidate_rx.recv() {
+        if decoded_tx.send(DecodeMessage::Candidate).is_err() {
+            break;
+        }
 
-    for path in candidates {
-        match decode_image_with_wic(&path) {
-            Ok(image) => {
-                let image_bytes = decoded_image_bytes(&image);
-                if !images.is_empty()
-                    && decoded_bytes.saturating_add(image_bytes) > memory_cap_bytes
-                {
-                    break;
-                }
-                decoded_bytes = decoded_bytes.saturating_add(image_bytes);
-                images.push(image);
-                if decoded_bytes >= memory_cap_bytes {
-                    break;
-                }
-            }
-            Err(_) => {
-                decode_failure_count += 1;
-            }
+        let message = match decode_image_with_wic(&path) {
+            Ok(image) => DecodeMessage::Decoded(image),
+            Err(_) => DecodeMessage::DecodeFailed,
+        };
+        if decoded_tx.send(message).is_err() {
+            break;
         }
     }
-
-    ImageScan {
-        candidate_count,
-        decode_failure_count,
-        decoded_bytes,
-        images,
+    if com_initialized {
+        unsafe {
+            CoUninitialize();
+        }
     }
 }
 
-fn select_image_candidates(roots: &[PathBuf], rng: &mut RandomState) -> Vec<PathBuf> {
+fn stream_image_candidates<F>(roots: &[PathBuf], rng: &mut RandomState, mut emit: F)
+where
+    F: FnMut(PathBuf) -> bool,
+{
     let mut photo_dirs = Vec::new();
     for _ in 0..MAX_SELECTION_ATTEMPTS {
         if photo_dirs.len() >= PHOTO_DIRECTORY_SAMPLE_COUNT {
@@ -280,17 +295,13 @@ fn select_image_candidates(roots: &[PathBuf], rng: &mut RandomState) -> Vec<Path
         };
         if let Some(dir) = choose_photo_directory(root, rng) {
             if !photo_dirs.iter().any(|existing| existing == &dir) {
+                if !stream_directory_images(&dir, rng, &mut emit) {
+                    break;
+                }
                 photo_dirs.push(dir);
             }
         }
     }
-
-    let mut candidates = Vec::new();
-    for dir in &photo_dirs {
-        collect_directory_images(dir, &mut candidates);
-    }
-    rng.shuffle(&mut candidates);
-    candidates
 }
 
 fn choose_photo_directory(root: &Path, rng: &mut RandomState) -> Option<PathBuf> {
@@ -328,7 +339,11 @@ fn choose_photo_directory(root: &Path, rng: &mut RandomState) -> Option<PathBuf>
     best
 }
 
-fn collect_directory_images(dir: &Path, images: &mut Vec<PathBuf>) {
+fn stream_directory_images<F>(dir: &Path, rng: &mut RandomState, emit: &mut F) -> bool
+where
+    F: FnMut(PathBuf) -> bool,
+{
+    let mut images = Vec::new();
     crate::traversal::for_each_child(dir, |entry| {
         if entry.is_reparse_point() || entry.is_hidden_or_system() {
             return true;
@@ -338,6 +353,70 @@ fn collect_directory_images(dir: &Path, images: &mut Vec<PathBuf>) {
         }
         true
     });
+    rng.shuffle(&mut images);
+    for image in images {
+        if !emit(image) {
+            return false;
+        }
+    }
+    true
+}
+
+fn service_decoded_queue(state: &mut AppState) {
+    if state.selection_done || state.decoded_bytes >= state.memory_cap_bytes {
+        return;
+    }
+
+    loop {
+        let message = match state.decoded_rx.try_recv() {
+            Ok(message) => message,
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                state.selection_done = true;
+                break;
+            }
+        };
+
+        match message {
+            DecodeMessage::Candidate => {
+                state.candidate_count += 1;
+            }
+            DecodeMessage::Decoded(image) => {
+                state.pending_decoded.push(image);
+            }
+            DecodeMessage::DecodeFailed => {
+                state.decode_failure_count += 1;
+            }
+        }
+    }
+
+    let mut uploads_this_frame = 0;
+    while uploads_this_frame < MAX_UPLOADS_PER_FRAME {
+        let Some(image) = state.pending_decoded.pop() else {
+            break;
+        };
+
+        let image_bytes = decoded_image_bytes(&image);
+        if !state.images.is_empty()
+            && state.decoded_bytes.saturating_add(image_bytes) > state.memory_cap_bytes
+        {
+            state.selection_done = true;
+            break;
+        }
+
+        if state.images.is_empty() {
+            state.started = Instant::now();
+        }
+        state.decoded_bytes = state.decoded_bytes.saturating_add(image_bytes);
+        state.images.push(image);
+        state.d2d = None;
+        uploads_this_frame += 1;
+
+        if state.decoded_bytes >= state.memory_cap_bytes {
+            state.selection_done = true;
+            break;
+        }
+    }
 }
 
 struct RandomState {
@@ -412,10 +491,13 @@ fn status_lines(state: &AppState) -> Vec<String> {
     }
 
     let mut lines = vec![format!(
-        "Octoglow loaded {} folder(s), found {} supported file candidate(s), decoded 0 image(s).",
+        "Octoglow loaded {} folder(s), discovered {} candidate(s), decoded 0 image(s).",
         state.image_roots.len(),
         state.candidate_count
     )];
+    if !state.selection_done {
+        lines.push("Selecting images...".to_string());
+    }
     if state.decode_failure_count > 0 {
         lines.push(format!(
             "{} candidate(s) failed WIC decode validation.",
@@ -478,8 +560,22 @@ fn decode_image_with_wic(path: &Path) -> windows::core::Result<DecodedImage> {
         )),
         width,
         height,
-        source,
+        pixels: copy_wic_pixels(&source, width, height)?,
     })
+}
+
+fn copy_wic_pixels(
+    source: &windows::Win32::Graphics::Imaging::IWICBitmapSource,
+    width: u32,
+    height: u32,
+) -> windows::core::Result<Vec<u8>> {
+    let stride = width.saturating_mul(4);
+    let size = stride.saturating_mul(height) as usize;
+    let mut pixels = vec![0u8; size];
+    unsafe {
+        source.CopyPixels(std::ptr::null(), stride, &mut pixels)?;
+    }
+    Ok(pixels)
 }
 
 fn current_image(state: &AppState) -> Option<&DecodedImage> {
@@ -552,10 +648,7 @@ fn ensure_direct2d_state(
     if !state_matches {
         let (d2d_context, swap_chain, target_bitmap) =
             create_direct2d_device_context(hwnd, width, height)?;
-        let mut bitmaps = Vec::with_capacity(state.images.len());
-        for image in &state.images {
-            bitmaps.push(unsafe { d2d_context.CreateBitmapFromWicBitmap(&image.source, None)? });
-        }
+        let bitmaps = create_direct2d_bitmaps(&d2d_context, &state.images)?;
         state.d2d = Some(Direct2DState {
             width,
             height,
@@ -567,6 +660,41 @@ fn ensure_direct2d_state(
     }
 
     Ok(state.d2d.as_mut().expect("Direct2D state was initialized"))
+}
+
+fn create_direct2d_bitmaps(
+    d2d_context: &ID2D1DeviceContext,
+    images: &[DecodedImage],
+) -> windows::core::Result<Vec<ID2D1Bitmap1>> {
+    let properties = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        bitmapOptions: Default::default(),
+        colorContext: Default::default(),
+    };
+
+    images
+        .iter()
+        .map(|image| {
+            let size = D2D_SIZE_U {
+                width: image.width,
+                height: image.height,
+            };
+            let pitch = image.width.saturating_mul(4);
+            unsafe {
+                d2d_context.CreateBitmap(
+                    size,
+                    Some(image.pixels.as_ptr().cast()),
+                    pitch,
+                    &properties,
+                )
+            }
+        })
+        .collect()
 }
 
 fn create_direct2d_device_context(

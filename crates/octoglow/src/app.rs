@@ -126,7 +126,7 @@ struct Direct2DState {
     d2d_context: ID2D1DeviceContext,
     swap_chain: IDXGISwapChain1,
     _target_bitmap: ID2D1Bitmap1,
-    bitmaps: Vec<ID2D1Bitmap1>,
+    bitmaps: Vec<Option<ID2D1Bitmap1>>,
 }
 
 impl ScreenSaver for OctoglowScreensaver {
@@ -409,7 +409,9 @@ fn service_decoded_queue(state: &mut AppState) {
         }
         state.decoded_bytes = state.decoded_bytes.saturating_add(image_bytes);
         state.images.push(image);
-        state.d2d = None;
+        if let Some(d2d) = state.d2d.as_mut() {
+            d2d.bitmaps.push(None);
+        }
         uploads_this_frame += 1;
 
         if state.decoded_bytes >= state.memory_cap_bytes {
@@ -598,7 +600,14 @@ fn render_with_direct2d(
     let elapsed = state.started.elapsed().as_secs_f32();
     let (current, next, alpha_next) = playback_indices(state, elapsed);
     ensure_direct2d_state(hwnd, state, width, height)?;
+    ensure_direct2d_bitmap(state, current)?;
+    if current != next && alpha_next == 0.0 {
+        let _ = ensure_direct2d_bitmap(state, next);
+    }
     let d2d = state.d2d.as_ref().expect("Direct2D state was initialized");
+    let can_draw_next = current != next
+        && alpha_next > 0.0
+        && d2d.bitmaps.get(next).and_then(Option::as_ref).is_some();
     let image_rects = state
         .images
         .iter()
@@ -619,7 +628,7 @@ fn render_with_direct2d(
     if elapsed < 2.0 {
         let opacity = (elapsed / 2.0).max(0.08);
         draw_direct2d_bitmap(d2d, &image_rects, current, opacity);
-    } else if current == next || alpha_next <= 0.0 {
+    } else if !can_draw_next {
         draw_direct2d_bitmap(d2d, &image_rects, current, 1.0);
     } else {
         draw_direct2d_bitmap(d2d, &image_rects, current, 1.0 - alpha_next);
@@ -648,24 +657,31 @@ fn ensure_direct2d_state(
     if !state_matches {
         let (d2d_context, swap_chain, target_bitmap) =
             create_direct2d_device_context(hwnd, width, height)?;
-        let bitmaps = create_direct2d_bitmaps(&d2d_context, &state.images)?;
         state.d2d = Some(Direct2DState {
             width,
             height,
             d2d_context,
             swap_chain,
             _target_bitmap: target_bitmap,
-            bitmaps,
+            bitmaps: (0..state.images.len()).map(|_| None).collect(),
         });
     }
 
     Ok(state.d2d.as_mut().expect("Direct2D state was initialized"))
 }
 
-fn create_direct2d_bitmaps(
-    d2d_context: &ID2D1DeviceContext,
-    images: &[DecodedImage],
-) -> windows::core::Result<Vec<ID2D1Bitmap1>> {
+fn ensure_direct2d_bitmap(state: &mut AppState, index: usize) -> windows::core::Result<()> {
+    let Some(image) = state.images.get(index) else {
+        return Ok(());
+    };
+    let d2d = state.d2d.as_mut().expect("Direct2D state was initialized");
+    while d2d.bitmaps.len() < state.images.len() {
+        d2d.bitmaps.push(None);
+    }
+    if d2d.bitmaps.get(index).and_then(Option::as_ref).is_some() {
+        return Ok(());
+    }
+
     let properties = D2D1_BITMAP_PROPERTIES1 {
         pixelFormat: D2D1_PIXEL_FORMAT {
             format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -677,24 +693,23 @@ fn create_direct2d_bitmaps(
         colorContext: Default::default(),
     };
 
-    images
-        .iter()
-        .map(|image| {
-            let size = D2D_SIZE_U {
-                width: image.width,
-                height: image.height,
-            };
-            let pitch = image.width.saturating_mul(4);
-            unsafe {
-                d2d_context.CreateBitmap(
-                    size,
-                    Some(image.pixels.as_ptr().cast()),
-                    pitch,
-                    &properties,
-                )
-            }
-        })
-        .collect()
+    let size = D2D_SIZE_U {
+        width: image.width,
+        height: image.height,
+    };
+    let pitch = image.width.saturating_mul(4);
+    let bitmap = unsafe {
+        d2d.d2d_context.CreateBitmap(
+            size,
+            Some(image.pixels.as_ptr().cast()),
+            pitch,
+            &properties,
+        )?
+    };
+    if let Some(slot) = d2d.bitmaps.get_mut(index) {
+        *slot = Some(bitmap);
+    }
+    Ok(())
 }
 
 fn create_direct2d_device_context(
@@ -829,7 +844,7 @@ fn fitted_rect(image_width: u32, image_height: u32, width: u32, height: u32) -> 
 }
 
 fn draw_direct2d_bitmap(d2d: &Direct2DState, rects: &[D2D_RECT_F], index: usize, opacity: f32) {
-    let Some(bitmap) = d2d.bitmaps.get(index) else {
+    let Some(bitmap) = d2d.bitmaps.get(index).and_then(Option::as_ref) else {
         return;
     };
     let Some(rect) = rects.get(index) else {

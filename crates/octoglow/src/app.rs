@@ -49,9 +49,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MessageBoxW, MB_ICONINFORMATION, MB_OK,
 };
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct Settings {
+    #[serde(default)]
     folders: Vec<String>,
+    #[serde(default = "default_memory_cap_mb")]
+    memory_cap_mb: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            folders: Vec::new(),
+            memory_cap_mb: DEFAULT_MEMORY_CAP_MB,
+        }
+    }
+}
+
+fn default_memory_cap_mb() -> u64 {
+    DEFAULT_MEMORY_CAP_MB
 }
 
 pub fn run() -> windows::core::Result<()> {
@@ -74,6 +90,8 @@ struct AppState {
     image_roots: Vec<PathBuf>,
     candidate_count: usize,
     decode_failure_count: usize,
+    memory_cap_bytes: u64,
+    decoded_bytes: u64,
     images: Vec<DecodedImage>,
     d2d: Option<Direct2DState>,
 }
@@ -85,7 +103,9 @@ struct DecodedImage {
     source: windows::Win32::Graphics::Imaging::IWICBitmapSource,
 }
 
-const MAX_STARTUP_IMAGES: usize = 12;
+const DEFAULT_MEMORY_CAP_MB: u64 = 1024;
+const PHOTO_DIRECTORY_SAMPLE_COUNT: usize = 5;
+const MAX_SELECTION_ATTEMPTS: usize = 128;
 
 struct Direct2DState {
     width: u32,
@@ -106,13 +126,21 @@ impl ScreenSaver for OctoglowScreensaver {
     }
 
     fn initialize(&mut self, _mode: RunMode) -> windows::core::Result<Self::State> {
-        let image_roots = load_config().unwrap_or_default();
-        let scan = collect_images(&image_roots);
+        let settings = load_config().unwrap_or_default();
+        let image_roots = settings
+            .folders
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let memory_cap_bytes = settings.memory_cap_mb.saturating_mul(1024 * 1024);
+        let scan = collect_images(&image_roots, memory_cap_bytes);
         Ok(AppState {
             started: Instant::now(),
             image_roots,
             candidate_count: scan.candidate_count,
             decode_failure_count: scan.decode_failure_count,
+            memory_cap_bytes,
+            decoded_bytes: scan.decoded_bytes,
             images: scan.images,
             d2d: None,
         })
@@ -200,24 +228,30 @@ fn launch_config_dialog(parent: Option<HWND>) -> windows::core::Result<()> {
 struct ImageScan {
     candidate_count: usize,
     decode_failure_count: usize,
+    decoded_bytes: u64,
     images: Vec<DecodedImage>,
 }
 
-fn collect_images(roots: &[PathBuf]) -> ImageScan {
-    let mut candidates = Vec::new();
-    for root in roots {
-        collect_image_candidates(root, &mut candidates);
-    }
-
+fn collect_images(roots: &[PathBuf], memory_cap_bytes: u64) -> ImageScan {
+    let mut rng = RandomState::new();
+    let candidates = select_image_candidates(roots, &mut rng);
     let candidate_count = candidates.len();
-    shuffle_paths(&mut candidates);
     let mut decode_failure_count = 0;
+    let mut decoded_bytes = 0u64;
     let mut images = Vec::new();
+
     for path in candidates {
         match decode_image_with_wic(&path) {
             Ok(image) => {
+                let image_bytes = decoded_image_bytes(&image);
+                if !images.is_empty()
+                    && decoded_bytes.saturating_add(image_bytes) > memory_cap_bytes
+                {
+                    break;
+                }
+                decoded_bytes = decoded_bytes.saturating_add(image_bytes);
                 images.push(image);
-                if images.len() >= MAX_STARTUP_IMAGES {
+                if decoded_bytes >= memory_cap_bytes {
                     break;
                 }
             }
@@ -230,36 +264,121 @@ fn collect_images(roots: &[PathBuf]) -> ImageScan {
     ImageScan {
         candidate_count,
         decode_failure_count,
+        decoded_bytes,
         images,
     }
 }
 
-fn shuffle_paths(paths: &mut [PathBuf]) {
-    let mut state = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0x9e3779b97f4a7c15);
-
-    for index in (1..paths.len()).rev() {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        paths.swap(index, (state as usize) % (index + 1));
+fn select_image_candidates(roots: &[PathBuf], rng: &mut RandomState) -> Vec<PathBuf> {
+    let mut photo_dirs = Vec::new();
+    for _ in 0..MAX_SELECTION_ATTEMPTS {
+        if photo_dirs.len() >= PHOTO_DIRECTORY_SAMPLE_COUNT {
+            break;
+        }
+        let Some(root) = rng.choose(roots) else {
+            break;
+        };
+        if let Some(dir) = choose_photo_directory(root, rng) {
+            if !photo_dirs.iter().any(|existing| existing == &dir) {
+                photo_dirs.push(dir);
+            }
+        }
     }
+
+    let mut candidates = Vec::new();
+    for dir in &photo_dirs {
+        collect_directory_images(dir, &mut candidates);
+    }
+    rng.shuffle(&mut candidates);
+    candidates
 }
 
-fn collect_image_candidates(root: &Path, images: &mut Vec<PathBuf>) {
-    crate::traversal::for_each_child(root, |entry| {
-        if entry.is_reparse_point() {
+fn choose_photo_directory(root: &Path, rng: &mut RandomState) -> Option<PathBuf> {
+    let mut current = root.to_path_buf();
+    let mut best = None;
+
+    for _ in 0..64 {
+        let mut child_dirs = Vec::new();
+        let mut image_count = 0usize;
+        crate::traversal::for_each_child(&current, |entry| {
+            if entry.is_reparse_point() || entry.is_hidden_or_system() {
+                return true;
+            }
+            if entry.is_directory() {
+                child_dirs.push(entry.path);
+            } else if entry.is_file() && has_supported_extension(&entry.path) {
+                image_count += 1;
+            }
+            true
+        });
+
+        if image_count > 0 {
+            best = Some(current.clone());
+            if child_dirs.is_empty() || rng.next_usize(3) == 0 {
+                break;
+            }
+        }
+
+        if child_dirs.is_empty() {
+            break;
+        }
+        current = child_dirs.swap_remove(rng.next_usize(child_dirs.len()));
+    }
+
+    best
+}
+
+fn collect_directory_images(dir: &Path, images: &mut Vec<PathBuf>) {
+    crate::traversal::for_each_child(dir, |entry| {
+        if entry.is_reparse_point() || entry.is_hidden_or_system() {
             return true;
         }
-        if entry.is_directory() {
-            collect_image_candidates(&entry.path, images);
-        } else if entry.is_file() && has_supported_extension(&entry.path) {
+        if entry.is_file() && has_supported_extension(&entry.path) {
             images.push(entry.path);
         }
         true
     });
+}
+
+struct RandomState {
+    state: u64,
+}
+
+impl RandomState {
+    fn new() -> Self {
+        Self {
+            state: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(0x9e3779b97f4a7c15),
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    fn next_usize(&mut self, upper: usize) -> usize {
+        if upper == 0 {
+            0
+        } else {
+            (self.next_u64() as usize) % upper
+        }
+    }
+
+    fn choose<'a, T>(&mut self, values: &'a [T]) -> Option<&'a T> {
+        values.get(self.next_usize(values.len()))
+    }
+
+    fn shuffle<T>(&mut self, values: &mut [T]) {
+        for index in (1..values.len()).rev() {
+            values.swap(index, self.next_usize(index + 1));
+        }
+    }
 }
 
 fn has_supported_extension(path: &Path) -> bool {
@@ -278,9 +397,11 @@ fn status_lines(state: &AppState) -> Vec<String> {
     if let Some(image) = current_image(state) {
         return vec![
             format!(
-                "Octoglow loaded {} of {} image candidate(s).",
+                "Octoglow loaded {} of {} candidate(s), using {} MB of {} MB.",
                 state.images.len(),
-                state.candidate_count
+                state.candidate_count,
+                state.decoded_bytes / (1024 * 1024),
+                state.memory_cap_bytes / (1024 * 1024)
             ),
             format!("Showing: {}", image.path.display()),
         ];
@@ -312,6 +433,12 @@ fn status_lines(state: &AppState) -> Vec<String> {
         lines.push(format!("...and {} more", state.image_roots.len() - 4));
     }
     lines
+}
+
+fn decoded_image_bytes(image: &DecodedImage) -> u64 {
+    u64::from(image.width)
+        .saturating_mul(u64::from(image.height))
+        .saturating_mul(4)
 }
 
 fn decode_image_with_wic(path: &Path) -> windows::core::Result<DecodedImage> {
@@ -600,16 +727,15 @@ fn config_file() -> windows::core::Result<PathBuf> {
     Ok(dir.join("settings.toml"))
 }
 
-fn load_config() -> windows::core::Result<Vec<PathBuf>> {
+fn load_config() -> windows::core::Result<Settings> {
     let file = config_file()?;
     if !file.exists() {
-        return Ok(Vec::new());
+        return Ok(Settings::default());
     }
 
     let bytes = fs::read(&file).map_err(io_error)?;
     let text = String::from_utf8_lossy(&bytes);
-    let settings = toml::from_str::<Settings>(&text).unwrap_or_default();
-    Ok(settings.folders.into_iter().map(PathBuf::from).collect())
+    Ok(toml::from_str::<Settings>(&text).unwrap_or_default())
 }
 
 fn ensure_directory(path: &Path) -> windows::core::Result<()> {

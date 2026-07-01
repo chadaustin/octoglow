@@ -76,6 +76,7 @@ The configuration UI is embedded in the screensaver binary and presents a Win32-
 The current format is:
 
 ```toml
+memory_cap_mb = 1024
 folders = [
   "D:\\Pictures",
   "E:\\Wallpapers",
@@ -98,14 +99,19 @@ Folder scanning accepts files with these extensions:
 - `.heic`
 - `.heif`
 
-Each candidate file is then opened with Windows Imaging Component. PNG and JPEG should work on standard Windows installations. HEIC/HEIF depends on the installed WIC codec, typically supplied by Microsoft's HEIF Image Extensions.
+Image selection is split from decoding. The selector samples a small number of photo-bearing directories by walking randomly through the configured roots and applying randomness at each level of the hierarchy. It does not need to load the full recursive tree before choosing images.
+
+Each selected candidate file is then opened with Windows Imaging Component. PNG and JPEG should work on standard Windows installations. HEIC/HEIF depends on the installed WIC codec, typically supplied by Microsoft's HEIF Image Extensions.
+
+Decoded image memory is bounded by `memory_cap_mb`, which defaults to 1024. Octoglow estimates decoded image cost as `width * height * 4` bytes and stops adding decoded images when the cap is reached. The renderer currently uploads the bounded decoded set to Direct2D bitmaps on the render thread. The intended next step is a decoder cache that probes/decodes ahead of presentation and keeps the current and next pictures ready for hitch-free crossfades.
 
 ## Next Implementation Steps
 
 Good follow-up work:
 
 - Add gentle pan and scale animation.
-- Track image metadata and cache scan results to avoid a full recursive scan on every launch.
+- Move image probing/decoding into a bounded decoder cache that prepares the next image before the crossfade.
+- Track image metadata and cache scan results for large libraries.
 - Add video support through Media Foundation.
 - Add an installer or documented manual install step that copies `octoglow.scr` to the appropriate Windows screensaver location.
 

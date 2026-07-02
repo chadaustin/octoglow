@@ -5,6 +5,8 @@ mod app;
 #[cfg(windows)]
 mod config_ui;
 #[cfg(windows)]
+mod playlist;
+#[cfg(windows)]
 mod traversal;
 
 #[cfg(windows)]

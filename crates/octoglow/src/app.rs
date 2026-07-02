@@ -3,14 +3,13 @@ use std::fs;
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
+use crate::playlist::{DecodedImage, Playlist, PlaylistEvent};
 use scrnsave::{RunMode, ScreenSaver, ScreenSaverConfig};
 use serde::Deserialize;
 use windows::core::{w, Interface, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, GENERIC_READ, HMODULE, HWND, RECT};
+use windows::Win32::Foundation::{COLORREF, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
@@ -38,15 +37,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, SetBkMode, SetTextColor,
     TextOutW, ValidateRect, HBRUSH, PAINTSTRUCT, TRANSPARENT,
 };
-use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_ContainerFormatHeif, GUID_ContainerFormatJpeg,
-    GUID_ContainerFormatPng, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
-    WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand,
-};
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED,
-};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MessageBoxW, MB_ICONINFORMATION, MB_OK,
 };
@@ -90,7 +81,7 @@ struct OctoglowScreensaver;
 struct AppState {
     started: Instant,
     image_roots: Vec<PathBuf>,
-    decoded_rx: Receiver<DecodeMessage>,
+    playlist: Playlist,
     selection_done: bool,
     candidate_count: usize,
     decode_failure_count: usize,
@@ -101,24 +92,8 @@ struct AppState {
     d2d: Option<Direct2DState>,
 }
 
-struct DecodedImage {
-    path: PathBuf,
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
-}
-
 const DEFAULT_MEMORY_CAP_MB: u64 = 1024;
-const PHOTO_DIRECTORY_SAMPLE_COUNT: usize = 5;
-const MAX_SELECTION_ATTEMPTS: usize = 128;
-const DECODE_QUEUE_CAPACITY: usize = 3;
 const MAX_UPLOADS_PER_FRAME: usize = 1;
-
-enum DecodeMessage {
-    Candidate,
-    Decoded(DecodedImage),
-    DecodeFailed,
-}
 
 struct Direct2DState {
     width: u32,
@@ -146,11 +121,11 @@ impl ScreenSaver for OctoglowScreensaver {
             .map(PathBuf::from)
             .collect::<Vec<_>>();
         let memory_cap_bytes = settings.memory_cap_mb.saturating_mul(1024 * 1024);
-        let decoded_rx = start_image_pipeline(image_roots.clone());
+        let playlist = Playlist::start(image_roots.clone());
         Ok(AppState {
             started: Instant::now(),
             image_roots,
-            decoded_rx,
+            playlist,
             selection_done: false,
             candidate_count: 0,
             decode_failure_count: 0,
@@ -242,151 +217,32 @@ fn launch_config_dialog(parent: Option<HWND>) -> windows::core::Result<()> {
     Ok(())
 }
 
-fn start_image_pipeline(roots: Vec<PathBuf>) -> Receiver<DecodeMessage> {
-    let (candidate_tx, candidate_rx) = mpsc::sync_channel::<PathBuf>(DECODE_QUEUE_CAPACITY);
-    let (decoded_tx, decoded_rx) = mpsc::sync_channel::<DecodeMessage>(DECODE_QUEUE_CAPACITY);
-
-    let selector_tx = candidate_tx.clone();
-    thread::spawn(move || {
-        let mut rng = RandomState::new();
-        stream_image_candidates(&roots, &mut rng, |path| selector_tx.send(path).is_ok());
-    });
-
-    thread::spawn(move || {
-        run_decoder(candidate_rx, decoded_tx);
-    });
-
-    decoded_rx
-}
-
-fn run_decoder(candidate_rx: Receiver<PathBuf>, decoded_tx: SyncSender<DecodeMessage>) {
-    let com_initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
-    while let Ok(path) = candidate_rx.recv() {
-        if decoded_tx.send(DecodeMessage::Candidate).is_err() {
-            break;
-        }
-
-        let message = match decode_image_with_wic(&path) {
-            Ok(image) => DecodeMessage::Decoded(image),
-            Err(_) => DecodeMessage::DecodeFailed,
-        };
-        if decoded_tx.send(message).is_err() {
-            break;
-        }
-    }
-    if com_initialized {
-        unsafe {
-            CoUninitialize();
-        }
-    }
-}
-
-fn stream_image_candidates<F>(roots: &[PathBuf], rng: &mut RandomState, mut emit: F)
-where
-    F: FnMut(PathBuf) -> bool,
-{
-    let mut photo_dirs = Vec::new();
-    for _ in 0..MAX_SELECTION_ATTEMPTS {
-        if photo_dirs.len() >= PHOTO_DIRECTORY_SAMPLE_COUNT {
-            break;
-        }
-        let Some(root) = rng.choose(roots) else {
-            break;
-        };
-        if let Some(dir) = choose_photo_directory(root, rng) {
-            if !photo_dirs.iter().any(|existing| existing == &dir) {
-                if !stream_directory_images(&dir, rng, &mut emit) {
-                    break;
-                }
-                photo_dirs.push(dir);
-            }
-        }
-    }
-}
-
-fn choose_photo_directory(root: &Path, rng: &mut RandomState) -> Option<PathBuf> {
-    let mut current = root.to_path_buf();
-    let mut best = None;
-
-    for _ in 0..64 {
-        let mut child_dirs = Vec::new();
-        let mut image_count = 0usize;
-        crate::traversal::for_each_child(&current, |entry| {
-            if entry.is_reparse_point() || entry.is_hidden_or_system() {
-                return true;
-            }
-            if entry.is_directory() {
-                child_dirs.push(entry.path);
-            } else if entry.is_file() && has_supported_extension(&entry.path) {
-                image_count += 1;
-            }
-            true
-        });
-
-        if image_count > 0 {
-            best = Some(current.clone());
-            if child_dirs.is_empty() || rng.next_usize(3) == 0 {
-                break;
-            }
-        }
-
-        if child_dirs.is_empty() {
-            break;
-        }
-        current = child_dirs.swap_remove(rng.next_usize(child_dirs.len()));
-    }
-
-    best
-}
-
-fn stream_directory_images<F>(dir: &Path, rng: &mut RandomState, emit: &mut F) -> bool
-where
-    F: FnMut(PathBuf) -> bool,
-{
-    let mut images = Vec::new();
-    crate::traversal::for_each_child(dir, |entry| {
-        if entry.is_reparse_point() || entry.is_hidden_or_system() {
-            return true;
-        }
-        if entry.is_file() && has_supported_extension(&entry.path) {
-            images.push(entry.path);
-        }
-        true
-    });
-    rng.shuffle(&mut images);
-    for image in images {
-        if !emit(image) {
-            return false;
-        }
-    }
-    true
-}
-
 fn service_decoded_queue(state: &mut AppState) {
     if state.selection_done || state.decoded_bytes >= state.memory_cap_bytes {
         return;
     }
 
     loop {
-        let message = match state.decoded_rx.try_recv() {
-            Ok(message) => message,
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
+        let message = match state.playlist.poll() {
+            PlaylistEvent::Pending => break,
+            PlaylistEvent::Finished => {
                 state.selection_done = true;
                 break;
             }
+            event => event,
         };
 
         match message {
-            DecodeMessage::Candidate => {
+            PlaylistEvent::Candidate => {
                 state.candidate_count += 1;
             }
-            DecodeMessage::Decoded(image) => {
+            PlaylistEvent::Decoded(image) => {
                 state.pending_decoded.push(image);
             }
-            DecodeMessage::DecodeFailed => {
+            PlaylistEvent::DecodeFailed => {
                 state.decode_failure_count += 1;
             }
+            PlaylistEvent::Pending | PlaylistEvent::Finished => unreachable!(),
         }
     }
 
@@ -419,59 +275,6 @@ fn service_decoded_queue(state: &mut AppState) {
             break;
         }
     }
-}
-
-struct RandomState {
-    state: u64,
-}
-
-impl RandomState {
-    fn new() -> Self {
-        Self {
-            state: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos() as u64)
-                .unwrap_or(0x9e3779b97f4a7c15),
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        self.state
-    }
-
-    fn next_usize(&mut self, upper: usize) -> usize {
-        if upper == 0 {
-            0
-        } else {
-            (self.next_u64() as usize) % upper
-        }
-    }
-
-    fn choose<'a, T>(&mut self, values: &'a [T]) -> Option<&'a T> {
-        values.get(self.next_usize(values.len()))
-    }
-
-    fn shuffle<T>(&mut self, values: &mut [T]) {
-        for index in (1..values.len()).rev() {
-            values.swap(index, self.next_usize(index + 1));
-        }
-    }
-}
-
-fn has_supported_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "heic" | "heif"
-            )
-        })
-        .unwrap_or(false)
 }
 
 fn status_lines(state: &AppState) -> Vec<String> {
@@ -523,61 +326,6 @@ fn decoded_image_bytes(image: &DecodedImage) -> u64 {
     u64::from(image.width)
         .saturating_mul(u64::from(image.height))
         .saturating_mul(4)
-}
-
-fn decode_image_with_wic(path: &Path) -> windows::core::Result<DecodedImage> {
-    let factory: IWICImagingFactory =
-        unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)? };
-    let path = wide_path(path);
-    let decoder = unsafe {
-        factory.CreateDecoderFromFilename(
-            PCWSTR(path.as_ptr()),
-            None,
-            GENERIC_READ,
-            WICDecodeMetadataCacheOnDemand,
-        )?
-    };
-    let format = unsafe { decoder.GetContainerFormat()? };
-
-    if !(format == GUID_ContainerFormatPng
-        || format == GUID_ContainerFormatJpeg
-        || format == GUID_ContainerFormatHeif)
-    {
-        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
-            0x80004005u32 as i32,
-        )));
-    }
-
-    let frame = unsafe { decoder.GetFrame(0)? };
-    let source = unsafe { WICConvertBitmapSource(&GUID_WICPixelFormat32bppPBGRA, &frame)? };
-    let mut width = 0;
-    let mut height = 0;
-    unsafe {
-        source.GetSize(&mut width, &mut height)?;
-    }
-
-    Ok(DecodedImage {
-        path: PathBuf::from(String::from_utf16_lossy(
-            &path[..path.len().saturating_sub(1)],
-        )),
-        width,
-        height,
-        pixels: copy_wic_pixels(&source, width, height)?,
-    })
-}
-
-fn copy_wic_pixels(
-    source: &windows::Win32::Graphics::Imaging::IWICBitmapSource,
-    width: u32,
-    height: u32,
-) -> windows::core::Result<Vec<u8>> {
-    let stride = width.saturating_mul(4);
-    let size = stride.saturating_mul(height) as usize;
-    let mut pixels = vec![0u8; size];
-    unsafe {
-        source.CopyPixels(std::ptr::null(), stride, &mut pixels)?;
-    }
-    Ok(pixels)
 }
 
 fn current_image(state: &AppState) -> Option<&DecodedImage> {
@@ -887,10 +635,6 @@ fn ensure_directory(path: &Path) -> windows::core::Result<()> {
 
 fn wide(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(once(0)).collect()
-}
-
-fn wide_path(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(once(0)).collect()
 }
 
 fn show_message(message: &str) {

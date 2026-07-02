@@ -105,6 +105,8 @@ Each selected candidate file is then opened with Windows Imaging Component. PNG 
 
 Decoded image memory is bounded by `memory_cap_mb`, which defaults to 1024. Octoglow estimates decoded image cost as `width * height * 4` bytes and stops adding decoded images when the cap is reached. A decoder worker performs WIC decode into BGRA CPU pixels off the render thread. The render thread only drains ready decoded images and incrementally uploads missing current/next Direct2D bitmaps, avoiding full cache rebuilds during playback. The intended next step is to make that cache explicitly target the current and next pictures for hitch-free crossfades.
 
+The file traversal and playlist pipeline live in `crates/octoglow/src/playlist.rs`. The screensaver owns rendering state and pulls from the playlist through `Playlist::poll()`, which yields `PlaylistEvent::Candidate`, `Decoded`, `DecodeFailed`, `Pending`, or `Finished`.
+
 ## Next Implementation Steps
 
 Good follow-up work:

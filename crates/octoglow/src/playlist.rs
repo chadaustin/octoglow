@@ -9,7 +9,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::GENERIC_READ;
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatHeif, GUID_ContainerFormatJpeg,
-    GUID_ContainerFormatPng, GUID_WICPixelFormat32bppPBGRA, IWICBitmapSource, IWICImagingFactory,
+    GUID_ContainerFormatPng, GUID_WICPixelFormat24bppBGR, IWICBitmapSource, IWICImagingFactory,
     WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::System::Com::{
@@ -36,6 +36,7 @@ pub struct DecodedImage {
     pub path: PathBuf,
     pub width: u32,
     pub height: u32,
+    /// 24-bit BGR pixels, tightly packed.
     pub pixels: Vec<u8>,
 }
 
@@ -213,7 +214,7 @@ fn decode_image_with_wic(path: &Path) -> windows::core::Result<DecodedImage> {
     }
 
     let frame = unsafe { decoder.GetFrame(0)? };
-    let source = unsafe { WICConvertBitmapSource(&GUID_WICPixelFormat32bppPBGRA, &frame)? };
+    let source = unsafe { WICConvertBitmapSource(&GUID_WICPixelFormat24bppBGR, &frame)? };
     let mut width = 0;
     let mut height = 0;
     unsafe {
@@ -235,7 +236,7 @@ fn copy_wic_pixels(
     width: u32,
     height: u32,
 ) -> windows::core::Result<Vec<u8>> {
-    let stride = width.saturating_mul(4);
+    let stride = width.saturating_mul(3);
     let size = stride.saturating_mul(height) as usize;
     let mut pixels = vec![0u8; size];
     unsafe {

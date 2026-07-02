@@ -56,7 +56,7 @@ target\release\octoglow.scr /a <parent-hwnd>
 
 Current behavior:
 
-- `/s` opens a borderless fullscreen Win32 window, scans configured folders, and paints a placeholder animated status line.
+- `/s` opens a borderless fullscreen Win32 window, scans configured folders, and renders images with Direct2D. Status lines are drawn by the same Direct2D renderer.
 - `/c` initializes the embedded Tauri configuration UI.
 - `/c:<hwnd>` also launches configuration, passing the parent HWND through the screensaver framework.
 - `/p` creates a preview window skeleton hosted by the parent HWND when one is provided.
@@ -103,7 +103,7 @@ Image selection is split from decoding. At screensaver startup, a background sel
 
 Each selected candidate file is then opened with Windows Imaging Component. PNG and JPEG should work on standard Windows installations. HEIC/HEIF depends on the installed WIC codec, typically supplied by Microsoft's HEIF Image Extensions.
 
-Decoded image memory is bounded by `memory_cap_mb`, which defaults to 1024. Octoglow estimates decoded image cost as `width * height * 4` bytes and stops adding decoded images when the cap is reached. A decoder worker performs WIC decode into BGRA CPU pixels off the render thread. The render thread only drains ready decoded images and incrementally uploads missing current/next Direct2D bitmaps, avoiding full cache rebuilds during playback. The intended next step is to make that cache explicitly target the current and next pictures for hitch-free crossfades.
+Decoded image memory is bounded by `memory_cap_mb`, which defaults to 1024. Octoglow estimates decoded image cost as `width * height * 3` bytes and stops adding decoded images when the cap is reached. A decoder worker performs WIC decode into BGR CPU pixels off the render thread. The render thread only drains ready decoded images and incrementally uploads missing current/next Direct2D bitmaps, expanding one image at a time to BGRA for Direct2D upload and avoiding full cache rebuilds during playback. Direct2D owns both image drawing and status text rendering; there is no GDI paint fallback.
 
 The file traversal and playlist pipeline live in `crates/octoglow/src/playlist.rs`. The screensaver owns rendering state and pulls from the playlist through `Playlist::poll()`, which yields `PlaylistEvent::Candidate`, `Decoded`, `DecodeFailed`, `Pending`, or `Finished`.
 

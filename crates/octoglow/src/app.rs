@@ -9,21 +9,27 @@ use crate::playlist::{DecodedImage, Playlist, PlaylistEvent};
 use scrnsave::{RunMode, ScreenSaver, ScreenSaverConfig};
 use serde::Deserialize;
 use windows::core::{w, Interface, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HMODULE, HWND, RECT};
+use windows::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+    ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+    DWRITE_TEXT_ALIGNMENT_LEADING,
 };
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -33,10 +39,7 @@ use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_SCALING_STRETCH,
     DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, SetBkMode, SetTextColor,
-    TextOutW, ValidateRect, HBRUSH, PAINTSTRUCT, TRANSPARENT,
-};
+use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, MessageBoxW, MB_ICONINFORMATION, MB_OK,
@@ -101,6 +104,8 @@ struct Direct2DState {
     d2d_context: ID2D1DeviceContext,
     swap_chain: IDXGISwapChain1,
     _target_bitmap: ID2D1Bitmap1,
+    text_format: IDWriteTextFormat,
+    text_brush: ID2D1SolidColorBrush,
     bitmaps: Vec<Option<ID2D1Bitmap1>>,
 }
 
@@ -161,49 +166,10 @@ fn paint(hwnd: HWND, state: &mut AppState) {
     let height = (rect.bottom - rect.top).max(1) as u32;
     service_decoded_queue(state);
 
-    if !state.images.is_empty() && render_with_direct2d(hwnd, state, width, height).is_ok() {
-        unsafe {
-            let _ = ValidateRect(Some(hwnd), None);
-            let _ = DwmFlush();
-        }
-        return;
-    }
-
-    let mut ps = PAINTSTRUCT::default();
-    let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-
-    let elapsed = state.started.elapsed().as_secs_f32();
-    let glow = ((elapsed.sin() + 1.0) * 70.0 + 90.0) as u8;
-    unsafe {
-        SetBkMode(hdc, TRANSPARENT);
-    }
-
-    let lines = status_lines(state);
+    let _ = render_with_direct2d(hwnd, state, width, height);
 
     unsafe {
-        let brush: HBRUSH = CreateSolidBrush(COLORREF(0x00101410));
-        FillRect(hdc, &rect, brush);
-        let _ = DeleteObject(brush.into());
-    }
-
-    let text_color = if state.images.is_empty() {
-        COLORREF((glow as u32) << 8 | 0x40)
-    } else {
-        COLORREF(0x00f0f0f0)
-    };
-    unsafe {
-        SetTextColor(hdc, text_color);
-    }
-
-    for (index, line) in lines.iter().enumerate() {
-        let text = wide(line);
-        unsafe {
-            let _ = TextOutW(hdc, 48, 48 + (index as i32 * 24), &text[..text.len() - 1]);
-        }
-    }
-
-    unsafe {
-        let _ = EndPaint(hwnd, &ps);
+        let _ = ValidateRect(Some(hwnd), None);
         let _ = DwmFlush();
     }
 }
@@ -325,7 +291,7 @@ fn status_lines(state: &AppState) -> Vec<String> {
 fn decoded_image_bytes(image: &DecodedImage) -> u64 {
     u64::from(image.width)
         .saturating_mul(u64::from(image.height))
-        .saturating_mul(4)
+        .saturating_mul(3)
 }
 
 fn current_image(state: &AppState) -> Option<&DecodedImage> {
@@ -339,28 +305,8 @@ fn render_with_direct2d(
     width: u32,
     height: u32,
 ) -> windows::core::Result<()> {
-    if state.images.is_empty() {
-        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
-            0x80004005u32 as i32,
-        )));
-    }
-
     let elapsed = state.started.elapsed().as_secs_f32();
-    let (current, next, alpha_next) = playback_indices(state, elapsed);
     ensure_direct2d_state(hwnd, state, width, height)?;
-    ensure_direct2d_bitmap(state, current)?;
-    if current != next && alpha_next == 0.0 {
-        let _ = ensure_direct2d_bitmap(state, next);
-    }
-    let d2d = state.d2d.as_ref().expect("Direct2D state was initialized");
-    let can_draw_next = current != next
-        && alpha_next > 0.0
-        && d2d.bitmaps.get(next).and_then(Option::as_ref).is_some();
-    let image_rects = state
-        .images
-        .iter()
-        .map(|image| fitted_rect(image.width, image.height, width, height))
-        .collect::<Vec<_>>();
     let black = D2D1_COLOR_F {
         r: 0.0,
         g: 0.0,
@@ -369,19 +315,49 @@ fn render_with_direct2d(
     };
 
     unsafe {
-        d2d.d2d_context.BeginDraw();
-        d2d.d2d_context.Clear(Some(&black));
+        state
+            .d2d
+            .as_ref()
+            .expect("Direct2D state was initialized")
+            .d2d_context
+            .BeginDraw();
+        state
+            .d2d
+            .as_ref()
+            .expect("Direct2D state was initialized")
+            .d2d_context
+            .Clear(Some(&black));
     }
 
-    if elapsed < 2.0 {
-        let opacity = (elapsed / 2.0).max(0.08);
-        draw_direct2d_bitmap(d2d, &image_rects, current, opacity);
-    } else if !can_draw_next {
-        draw_direct2d_bitmap(d2d, &image_rects, current, 1.0);
-    } else {
-        draw_direct2d_bitmap(d2d, &image_rects, current, 1.0 - alpha_next);
-        draw_direct2d_bitmap(d2d, &image_rects, next, alpha_next);
+    if !state.images.is_empty() {
+        let (current, next, alpha_next) = playback_indices(state, elapsed);
+        ensure_direct2d_bitmap(state, current)?;
+        if current != next && alpha_next == 0.0 {
+            let _ = ensure_direct2d_bitmap(state, next);
+        }
+        let d2d = state.d2d.as_ref().expect("Direct2D state was initialized");
+        let can_draw_next = current != next
+            && alpha_next > 0.0
+            && d2d.bitmaps.get(next).and_then(Option::as_ref).is_some();
+        let image_rects = state
+            .images
+            .iter()
+            .map(|image| fitted_rect(image.width, image.height, width, height))
+            .collect::<Vec<_>>();
+
+        if elapsed < 2.0 {
+            let opacity = (elapsed / 2.0).max(0.08);
+            draw_direct2d_bitmap(d2d, &image_rects, current, opacity);
+        } else if !can_draw_next {
+            draw_direct2d_bitmap(d2d, &image_rects, current, 1.0);
+        } else {
+            draw_direct2d_bitmap(d2d, &image_rects, current, 1.0 - alpha_next);
+            draw_direct2d_bitmap(d2d, &image_rects, next, alpha_next);
+        }
     }
+
+    let d2d = state.d2d.as_ref().expect("Direct2D state was initialized");
+    draw_status_text(d2d, state, width, height);
 
     unsafe {
         d2d.d2d_context.EndDraw(None, None)?;
@@ -405,17 +381,75 @@ fn ensure_direct2d_state(
     if !state_matches {
         let (d2d_context, swap_chain, target_bitmap) =
             create_direct2d_device_context(hwnd, width, height)?;
+        let text_format = create_text_format()?;
+        let text_color = D2D1_COLOR_F {
+            r: 0.92,
+            g: 0.96,
+            b: 0.92,
+            a: 0.88,
+        };
+        let text_brush = unsafe { d2d_context.CreateSolidColorBrush(&text_color, None)? };
         state.d2d = Some(Direct2DState {
             width,
             height,
             d2d_context,
             swap_chain,
             _target_bitmap: target_bitmap,
+            text_format,
+            text_brush,
             bitmaps: (0..state.images.len()).map(|_| None).collect(),
         });
     }
 
     Ok(state.d2d.as_mut().expect("Direct2D state was initialized"))
+}
+
+fn create_text_format() -> windows::core::Result<IDWriteTextFormat> {
+    let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+    let format = unsafe {
+        factory.CreateTextFormat(
+            w!("Segoe UI"),
+            None::<&IDWriteFontCollection>,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            18.0,
+            w!("en-us"),
+        )?
+    };
+    unsafe {
+        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
+        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+    }
+    Ok(format)
+}
+
+fn draw_status_text(d2d: &Direct2DState, state: &AppState, width: u32, height: u32) {
+    let lines = status_lines(state);
+    let mut top = 44.0;
+    for line in lines {
+        let text = OsStr::new(&line).encode_wide().collect::<Vec<_>>();
+        let rect = D2D_RECT_F {
+            left: 48.0,
+            top,
+            right: (width as f32 - 48.0).max(48.0),
+            bottom: (top + 28.0).min(height as f32),
+        };
+        unsafe {
+            d2d.d2d_context.DrawText(
+                &text,
+                &d2d.text_format,
+                &rect,
+                &d2d.text_brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+        top += 24.0;
+        if top >= height as f32 {
+            break;
+        }
+    }
 }
 
 fn ensure_direct2d_bitmap(state: &mut AppState, index: usize) -> windows::core::Result<()> {
@@ -445,11 +479,12 @@ fn ensure_direct2d_bitmap(state: &mut AppState, index: usize) -> windows::core::
         width: image.width,
         height: image.height,
     };
+    let upload_pixels = bgr_to_bgra(&image.pixels);
     let pitch = image.width.saturating_mul(4);
     let bitmap = unsafe {
         d2d.d2d_context.CreateBitmap(
             size,
-            Some(image.pixels.as_ptr().cast()),
+            Some(upload_pixels.as_ptr().cast()),
             pitch,
             &properties,
         )?
@@ -458,6 +493,14 @@ fn ensure_direct2d_bitmap(state: &mut AppState, index: usize) -> windows::core::
         *slot = Some(bitmap);
     }
     Ok(())
+}
+
+fn bgr_to_bgra(pixels: &[u8]) -> Vec<u8> {
+    let mut expanded = Vec::with_capacity((pixels.len() / 3) * 4);
+    for bgr in pixels.chunks_exact(3) {
+        expanded.extend_from_slice(&[bgr[0], bgr[1], bgr[2], 0xff]);
+    }
+    expanded
 }
 
 fn create_direct2d_device_context(
